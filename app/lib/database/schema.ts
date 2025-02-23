@@ -1,11 +1,20 @@
 import { z } from 'zod';
+import type { ColumnDefinition } from './types';
 
 // Schema for table creation
-export const TableSchema = z.object({
-  name: z.string().min(1).max(63).regex(/^[a-z][a-z0-9_]*$/),
+export const TABLE_SCHEMA = z.object({
+  name: z
+    .string()
+    .min(1)
+    .max(63)
+    .regex(/^[a-z][a-z0-9_]*$/),
   columns: z.array(
     z.object({
-      name: z.string().min(1).max(63).regex(/^[a-z][a-z0-9_]*$/),
+      name: z
+        .string()
+        .min(1)
+        .max(63)
+        .regex(/^[a-z][a-z0-9_]*$/),
       type: z.enum([
         'text',
         'varchar',
@@ -51,55 +60,51 @@ export const TableSchema = z.object({
   ),
 });
 
-export type TableDefinition = z.infer<typeof TableSchema>;
+export type TableDefinition = z.infer<typeof TABLE_SCHEMA>;
+
+// Interface for table schema
+export interface TableSchema {
+  name: string;
+  columns: ColumnDefinition[];
+  constraints?: string[];
+  indexes?: string[];
+}
 
 // Helper to generate SQL for table creation
-export function generateTableSQL(table: TableDefinition): string {
-  let sql = `/*
-  # Create ${table.name} table
-  
-  1. New Tables
-    - ${table.name}
-${table.columns.map((col) => `      - ${col.name} (${col.type}${col.nullable ? ', nullable' : ''}${col.unique ? ', unique' : ''}${col.primaryKey ? ', primary key' : ''})`).join('\n')}
-  
-  2. Security
-    - Enable RLS: ${table.enableRLS}
-    - Policies:
-${table.policies.map((policy) => `      - ${policy.name} (${policy.action} for ${policy.role})`).join('\n')}
-*/
-
-CREATE TABLE IF NOT EXISTS ${table.name} (
-  ${table.columns
+export function generateTableSQL(table: TableSchema): string {
+  const columnDefs = table.columns
     .map((col) => {
-      let definition = `${col.name} ${col.type}`;
-      if (col.primaryKey) definition += ' PRIMARY KEY';
-      if (!col.nullable) definition += ' NOT NULL';
-      if (col.unique) definition += ' UNIQUE';
-      if (col.defaultValue) definition += ` DEFAULT ${col.defaultValue}`;
-      if (col.references) {
-        definition += ` REFERENCES ${col.references.table}(${col.references.column})`;
-        if (col.references.onDelete !== 'NO ACTION') {
-          definition += ` ON DELETE ${col.references.onDelete}`;
-        }
+      let def = `${col.name} ${col.type}`;
+
+      if (col.nullable === false) {
+        def += ' NOT NULL';
       }
-      return definition;
+
+      if (col.default !== undefined) {
+        def += ` DEFAULT ${col.default}`;
+      }
+
+      if (col.unique) {
+        def += ' UNIQUE';
+      }
+
+      return def;
     })
-    .join(',\n  ')}
-);
+    .join(',\n  ');
 
-${table.enableRLS ? `\nALTER TABLE ${table.name} ENABLE ROW LEVEL SECURITY;` : ''}
+  let sql = `CREATE TABLE IF NOT EXISTS ${table.name} (\n  ${columnDefs}`;
 
-${table.policies
-  .map(
-    (policy) => `
-CREATE POLICY "${policy.name}"
-  ON ${table.name}
-  FOR ${policy.action}
-  TO ${policy.role}
-  USING (${policy.using})${policy.check ? `\n  WITH CHECK (${policy.check})` : ''};`,
-  )
-  .join('\n')}
-`
+  // Add constraints if any
+  if (table.constraints?.length) {
+    sql += ',\n  ' + table.constraints.join(',\n  ');
+  }
+
+  sql += '\n);';
+
+  // Add indexes if any
+  if (table.indexes?.length) {
+    sql += '\n\n' + table.indexes.join(';\n') + ';';
+  }
 
   return sql;
 }

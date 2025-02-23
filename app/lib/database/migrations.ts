@@ -1,16 +1,11 @@
 import { createSupabaseClient } from './supabase';
-import { generateProjectRef } from './supabase';
-import { TableDefinition, generateTableSQL } from './schema';
+import type { TableDefinition } from './schema';
+import { generateTableSQL } from './schema';
 import { toast } from 'react-toastify';
 
 export async function createMigration(table: TableDefinition): Promise<string> {
   try {
     const sql = generateTableSQL(table);
-    const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
-    const filename = `${timestamp}_create_${table.name}.sql`;
-    
-    // In a real filesystem we would write the file here
-    // For now we'll just return the SQL
     return sql;
   } catch (error) {
     console.error('Failed to create migration:', error);
@@ -18,17 +13,17 @@ export async function createMigration(table: TableDefinition): Promise<string> {
   }
 }
 
-export async function executeMigration(sql: string) {
+export async function executeMigration(sql: string): Promise<void> {
   try {
     const supabase = createSupabaseClient();
     const { error } = await supabase.rpc('execute_sql', { sql_query: sql });
-    
-    if (error) throw error;
-    
-    toast.success('Migration executed successfully');
+
+    if (error) {
+      throw error;
+    }
   } catch (error) {
     console.error('Failed to execute migration:', error);
-    toast.error('Failed to execute migration');
+    toast.error('Failed to execute database migration');
     throw error;
   }
 }

@@ -1,46 +1,45 @@
-import * as React from 'react';
-import { cva, type VariantProps } from 'class-variance-authority';
-import { classNames } from '~/utils/classNames';
+import { forwardRef } from 'react';
+import { cn } from '~/utils/classNames';
 
-const buttonVariants = cva(
-  'inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-bolt-elements-borderColor disabled:pointer-events-none disabled:opacity-50',
-  {
-    variants: {
-      variant: {
-        default: 'bg-bolt-elements-background text-bolt-elements-textPrimary hover:bg-bolt-elements-background-depth-2',
-        destructive: 'bg-red-500 text-white hover:bg-red-600',
-        outline:
-          'border border-input bg-transparent hover:bg-bolt-elements-background-depth-2 hover:text-bolt-elements-textPrimary',
-        secondary:
-          'bg-bolt-elements-background-depth-1 text-bolt-elements-textPrimary hover:bg-bolt-elements-background-depth-2',
-        ghost: 'hover:bg-bolt-elements-background-depth-1 hover:text-bolt-elements-textPrimary',
-        link: 'text-bolt-elements-textPrimary underline-offset-4 hover:underline',
-      },
-      size: {
-        default: 'h-9 px-4 py-2',
-        sm: 'h-8 rounded-md px-3 text-xs',
-        lg: 'h-10 rounded-md px-8',
-        icon: 'h-9 w-9',
-      },
-    },
-    defaultVariants: {
-      variant: 'default',
-      size: 'default',
-    },
-  },
-);
-
-export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
-    VariantProps<typeof buttonVariants> {
-  _asChild?: boolean;
+export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: 'default' | 'outline' | 'ghost' | 'secondary';
+  size?: 'xs' | 'sm' | 'default' | 'lg' | 'icon';
+  loading?: boolean;
 }
 
-const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, _asChild = false, ...props }, ref) => {
-    return <button className={classNames(buttonVariants({ variant, size }), className)} ref={ref} {...props} />;
+const Button = forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant = 'default', size = 'default', loading, children, ...props }, ref) => {
+    return (
+      <button
+        className={cn(
+          'inline-flex items-center justify-center gap-2 font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50',
+          {
+            // Variants
+            'bg-bolt-primary text-white hover:bg-bolt-primary/90': variant === 'default',
+            'border border-bolt-border bg-transparent hover:bg-bolt-accent hover:text-bolt-accent-foreground':
+              variant === 'outline',
+            'hover:bg-bolt-accent hover:text-bolt-accent-foreground': variant === 'ghost',
+            'bg-bolt-elements-background-depth-1 text-bolt-elements-textPrimary hover:bg-bolt-elements-background-depth-2':
+              variant === 'secondary',
+
+            // Sizes
+            'h-7 px-2 text-xs': size === 'xs',
+            'h-9 px-3 text-sm': size === 'sm',
+            'h-10 px-4 text-sm': size === 'default',
+            'h-11 px-8 text-base': size === 'lg',
+            'h-9 w-9 p-0': size === 'icon',
+          },
+          className,
+        )}
+        ref={ref}
+        {...props}
+      >
+        {loading ? <div className="i-ph:spinner animate-spin" /> : children}
+      </button>
+    );
   },
 );
+
 Button.displayName = 'Button';
 
-export { Button, buttonVariants };
+export { Button };

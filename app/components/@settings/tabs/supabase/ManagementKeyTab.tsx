@@ -4,7 +4,6 @@ import { toast } from 'react-toastify';
 import { Button } from '~/components/ui/Button';
 import { Input } from '~/components/ui/Input';
 import { getManagementKey, setManagementKey, clearManagementKey } from '~/lib/database/management';
-import { classNames } from '~/utils/classNames';
 
 export default function ManagementKeyTab() {
   const [managementKey, setKey] = useState('');
@@ -14,6 +13,7 @@ export default function ManagementKeyTab() {
   useEffect(() => {
     const key = getManagementKey();
     setHasKey(!!key);
+
     if (key) {
       setKey(key);
     }
@@ -56,9 +56,7 @@ export default function ManagementKeyTab() {
           <div className="flex items-center justify-between mb-4">
             <div>
               <h3 className="text-base font-medium text-bolt-elements-textPrimary">Management API Key</h3>
-              <p className="text-sm text-bolt-elements-textSecondary mt-1">
-                Required for automatic project creation
-              </p>
+              <p className="text-sm text-bolt-elements-textSecondary mt-1">Required for automatic project creation</p>
             </div>
             {hasKey && !isEditing && (
               <div className="flex items-center gap-2">

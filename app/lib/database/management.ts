@@ -1,11 +1,23 @@
 import { toast } from 'react-toastify';
 import { logStore } from '~/lib/stores/logs';
-import { generateProjectRef } from './supabase';
+import { createClient } from '@supabase/supabase-js';
 
 const MANAGEMENT_KEY_STORAGE = 'bolt_supabase_management';
 const MAX_POLL_ATTEMPTS = 180; // 3 minutes with 1-second intervals
 const POLL_INTERVAL = 1000; // 1 second
-const INITIAL_DELAY = 60000; // 1 minute initial delay before first status check
+
+interface Organization {
+  id: string;
+  name: string;
+}
+
+interface ProjectCreateParams {
+  name: string;
+  organization_id: string;
+  region?: string;
+  db_pass?: string;
+  kps_enabled?: boolean;
+}
 
 interface ProjectStatus {
   ref: string;
@@ -14,11 +26,21 @@ interface ProjectStatus {
     anon_key: string;
     service_role_key: string;
   };
-  services: {
+  services: Array<{
     name: string;
     status: string;
     statusMessage?: string;
-  }[];
+  }>;
+}
+
+interface ApiErrorResponse {
+  error?: string;
+  message?: string;
+}
+
+interface ApiResponse<T> {
+  data: T;
+  error: ApiErrorResponse | null;
 }
 
 export function getManagementKey(): string | null {
@@ -33,215 +55,210 @@ export function clearManagementKey() {
   localStorage.removeItem(MANAGEMENT_KEY_STORAGE);
 }
 
-export async function createSupabaseProject(description: string, region = 'us-east-1') {
+async function fetchOrganizations(): Promise<Organization[]> {
   const managementKey = getManagementKey();
+
   if (!managementKey) {
     throw new Error('Management key not found');
   }
 
-  const dbPass = generateSecurePassword();
+  const response = await fetch('/api/supabase', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Supabase-Management-Key': managementKey,
+    },
+    body: JSON.stringify({
+      path: '/organizations',
+      method: 'GET',
+    }),
+  });
+
+  const data = (await response.json()) as ApiResponse<Organization[]>;
+
+  if (!response.ok) {
+    throw new Error(data.error?.message || 'Failed to fetch organizations');
+  }
+
+  return data.data;
+}
+
+async function createProject(params: ProjectCreateParams): Promise<ProjectStatus> {
+  const managementKey = getManagementKey();
+
+  if (!managementKey) {
+    throw new Error('Management key not found');
+  }
+
+  const response = await fetch('/api/supabase', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Supabase-Management-Key': managementKey,
+    },
+    body: JSON.stringify({
+      path: '/projects',
+      method: 'POST',
+      body: params,
+    }),
+  });
+
+  const data = (await response.json()) as ApiResponse<ProjectStatus>;
+
+  if (!response.ok) {
+    throw new Error(data.error?.message || 'Failed to create project');
+  }
+
+  return data.data;
+}
+
+function logInfo(message: string, details: Record<string, unknown>) {
+  logStore.logInfo(message, {
+    type: 'supabase_status',
+    message,
+    ...details,
+  });
+}
+
+export async function createSupabaseProject(description: string, region = 'us-east-1'): Promise<ProjectStatus> {
+  const managementKey = getManagementKey();
+
+  if (!managementKey) {
+    throw new Error('Management key not found');
+  }
 
   try {
-    logStore.logInfo('Creating Supabase project', {
+    logInfo('Creating Supabase project', {
       type: 'supabase_create',
-      message: 'Starting project creation process',
       description,
       region,
     });
 
-    // Get organization ID first
-    const orgResponse = await fetch('/api/supabase', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Supabase-Management-Key': managementKey,
-      },
-      body: JSON.stringify({
-        path: '/organizations',
-        method: 'GET'
-      }),
-    });
+    const organizations = await fetchOrganizations();
 
-    if (!orgResponse.ok) {
-      const error = await orgResponse.json();
-      logStore.logError('Failed to get organizations', error);
-      throw new Error(error.error || 'Failed to get organizations');
-    }
-
-    const organizations = await orgResponse.json();
-    if (!organizations?.length) {
+    if (!organizations.length) {
       throw new Error('No organizations found');
     }
 
-    const organizationId = organizations[0].id;
-    logStore.logInfo('Found organization', {
-      type: 'supabase_create',
-      message: 'Organization found',
-      organizationId,
+    const project = await createProject({
+      name: description,
+      organization_id: organizations[0].id,
+      region,
+      db_pass: generateSecurePassword(),
+      kps_enabled: true,
     });
 
-    // Create project
-    const createResponse = await fetch('/api/supabase', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Supabase-Management-Key': managementKey,
-      },
-      body: JSON.stringify({
-        path: '/projects',
-        method: 'POST',
-        body: {
-          name: description,
-          organization_id: organizationId,
-          region,
-          db_pass: dbPass,
-          kps_enabled: true
-        },
-      }),
+    // Wait for project to be ready
+    const status = await pollProjectStatus(project.ref, managementKey);
+
+    // Execute initial migrations
+    const supabase = createClient(`https://${status.ref}.supabase.co`, status.api.service_role_key);
+
+    // Execute the get_table_info function migration
+    await supabase.rpc('execute_sql', {
+      sql_query: `
+        CREATE OR REPLACE FUNCTION public.get_table_info()
+        RETURNS TABLE (
+          table_name text,
+          row_count bigint,
+          size bigint
+        ) 
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        AS $$
+        BEGIN
+          RETURN QUERY
+          SELECT 
+            tables.table_name::text,
+            (xpath('/row/c/text()', query_to_xml(format('SELECT COUNT(*) AS c FROM %I.%I', table_schema, table_name), FALSE, TRUE, '')))[1]::text::bigint AS row_count,
+            pg_total_relation_size(format('%I.%I', table_schema, table_name)::regclass) AS size
+          FROM information_schema.tables
+          WHERE table_schema = 'public'
+          AND table_type = 'BASE TABLE';
+        END;
+        $$;
+
+        GRANT EXECUTE ON FUNCTION public.get_table_info() TO authenticated;
+      `,
     });
 
-    if (!createResponse.ok) {
-      const error = await createResponse.json();
-      logStore.logError('Failed to create project', error);
-      throw new Error(error.error || 'Failed to create project');
-    }
-
-    const project = await createResponse.json();
-    logStore.logInfo('Project created', {
-      type: 'supabase_create',
-      message: 'Project created successfully',
-      projectRef: project.ref,
-    });
-
-    // Add initial delay before starting to poll
-    logStore.logInfo('Waiting for initial setup', {
-      type: 'supabase_create',
-      message: `Waiting ${INITIAL_DELAY/1000} seconds before checking status`,
-      projectRef: project.ref,
-    });
-
-    toast.info(`Project created. Waiting ${INITIAL_DELAY/1000} seconds for initial setup...`, {
-      autoClose: false,
-      toastId: 'supabase-initial-delay'
-    });
-
-    await new Promise(resolve => setTimeout(resolve, INITIAL_DELAY));
-    
-    toast.dismiss('supabase-initial-delay');
-    
-    // Start polling for project status
-    return pollProjectStatus(project.ref, managementKey);
+    return status;
   } catch (error) {
-    logStore.logError('Failed to create Supabase project', error);
+    logStore.logError('Failed to create Supabase project', error as Error);
     throw error;
   }
 }
 
-function generateSecurePassword(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
-  const length = 16;
-  return Array.from(crypto.getRandomValues(new Uint32Array(length)))
-    .map((x) => chars[x % chars.length])
-    .join('');
-}
-
 async function pollProjectStatus(projectRef: string, managementKey: string): Promise<ProjectStatus> {
   let attempts = 0;
-  let lastError: Error | null = null;
-  const maxRetries = 3;
-
-  const checkStatus = async (retryCount = 0): Promise<ProjectStatus> => {
-    try {
-      const response = await fetch('/api/supabase', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Supabase-Management-Key': managementKey,
-        },
-        body: JSON.stringify({
-          path: `/projects/${projectRef}`,
-          method: 'GET'
-        }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Failed to check project status');
-      }
-
-      const status = await response.json();
-      logStore.logInfo('Project status check', {
-        type: 'supabase_status',
-        message: 'Project status retrieved',
-        projectRef,
-        status: status.status,
-        services: status.services.map((s: any) => ({ name: s.name, status: s.status })),
-      });
-
-      return status;
-    } catch (error) {
-      lastError = error as Error;
-      
-      if (retryCount < maxRetries) {
-        logStore.logWarning(`Retrying status check (attempt ${retryCount + 1}/${maxRetries})`, {
-          type: 'supabase_status',
-          error: lastError.message,
-          projectRef,
-        });
-        
-        // Exponential backoff
-        await new Promise(resolve => setTimeout(resolve, Math.pow(2, retryCount) * 1000));
-        return checkStatus(retryCount + 1);
-      }
-      
-      throw error;
-    }
-  };
 
   return new Promise((resolve, reject) => {
     const poll = async () => {
       try {
-        const status = await checkStatus();
-        
+        const response = await fetch('/api/supabase', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Supabase-Management-Key': managementKey,
+          },
+          body: JSON.stringify({
+            path: `/projects/${projectRef}`,
+            method: 'GET',
+          }),
+        });
+
+        const data = (await response.json()) as ApiResponse<ProjectStatus>;
+
+        if (!response.ok) {
+          throw new Error(data.error?.message || 'Failed to check project status');
+        }
+
+        const status = data.data;
+
+        logInfo('Project status retrieved', {
+          projectRef,
+          status: status.status,
+          services: status.services.map((s) => ({ name: s.name, status: s.status })),
+        });
+
         // Update toast with current status
-        const pendingServices = status.services.filter(s => s.status !== 'ACTIVE_HEALTHY');
+        const pendingServices = status.services.filter((s) => s.status !== 'ACTIVE_HEALTHY');
+
         if (pendingServices.length > 0) {
-          const message = `Setting up: ${pendingServices.map(s => s.name).join(', ')}`;
+          const message = `Setting up: ${pendingServices.map((s) => s.name).join(', ')}`;
           toast.info(message, {
             autoClose: false,
             toastId: 'supabase-setup',
           });
-          logStore.logInfo(message, {
-            type: 'supabase_status',
+          logInfo(message, {
             projectRef,
             pendingServices: pendingServices.length,
           });
         }
 
         // Check if all services are ready
-        const allReady = status.services.every(s => s.status === 'ACTIVE_HEALTHY');
+        const allReady = status.services.every((s) => s.status === 'ACTIVE_HEALTHY');
+
         if (allReady) {
           toast.dismiss('supabase-setup');
           toast.success('Supabase project is ready!');
-          logStore.logInfo('Project setup complete', {
-            type: 'supabase_status',
+          logInfo('Project setup complete', {
             message: 'All services are healthy',
             projectRef,
           });
           resolve(status);
+
           return;
         }
 
         // Check timeout
         if (++attempts >= MAX_POLL_ATTEMPTS) {
           toast.dismiss('supabase-setup');
+
           const timeoutError = new Error(`Timeout waiting for project to be ready after ${MAX_POLL_ATTEMPTS} attempts`);
-          logStore.logError('Project setup timeout', timeoutError, {
-            type: 'supabase_status',
-            projectRef,
-            attempts,
-          });
+          logStore.logError('Project setup timeout', timeoutError);
           reject(timeoutError);
+
           return;
         }
 
@@ -249,15 +266,20 @@ async function pollProjectStatus(projectRef: string, managementKey: string): Pro
         setTimeout(poll, POLL_INTERVAL);
       } catch (error) {
         toast.dismiss('supabase-setup');
-        logStore.logError('Failed to check project status', error, {
-          type: 'supabase_status',
-          projectRef,
-          attempts,
-        });
+        logStore.logError('Failed to check project status', error as Error);
         reject(error);
       }
     };
 
     poll();
   });
+}
+
+function generateSecurePassword(): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
+  const length = 16;
+
+  return Array.from(crypto.getRandomValues(new Uint32Array(length)))
+    .map((x) => chars[x % chars.length])
+    .join('');
 }

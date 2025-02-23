@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { nanoid } from 'nanoid';
-import { toast } from 'react-toastify';
 
+// Handles storing and retrieving Supabase configuration
 export interface SupabaseConfig {
   projectUrl: string;
   apiKey: string;
@@ -10,6 +10,7 @@ export interface SupabaseConfig {
 // Store Supabase config in localStorage
 const SUPABASE_CONFIG_KEY = 'bolt_supabase_config';
 
+// Core functions for config management
 export function getSupabaseConfig(): SupabaseConfig | null {
   try {
     const config = localStorage.getItem(SUPABASE_CONFIG_KEY);
@@ -35,9 +36,11 @@ export function clearSupabaseConfig() {
 // Create Supabase client with stored config
 export function createSupabaseClient() {
   const config = getSupabaseConfig();
+
   if (!config) {
     throw new Error('Supabase configuration not found');
   }
+
   return createClient(config.projectUrl, config.apiKey, {
     auth: {
       persistSession: true,
@@ -56,28 +59,33 @@ export async function verifySupabaseConnection(config: SupabaseConfig): Promise<
       },
     });
 
-    // First try to get table info
+    // Try to get table info first
     const { error: tableError } = await supabase.rpc('get_table_info');
-    
-    // If table info fails with 42P01 (relation does not exist), that's OK - try test connection table
-    if (tableError && tableError.code === '42P01') {
-      const { error: testError } = await supabase
-        .from('_test_connection')
-        .select('*')
-        .limit(1)
-        .single();
 
-      // PGRST116 means no rows found, which is OK
-      // 42P01 means table doesn't exist, which is also OK for a new project
-      if (testError && !['PGRST116', '42P01'].includes(testError.code || '')) {
-        console.error('Supabase connection error:', testError);
-        return false;
+    // Handle different error cases
+    if (tableError) {
+      // PGRST202 means function not found - this is expected for new projects
+      if (tableError.code === 'PGRST202') {
+        // Try test connection table instead
+        const { error: testError } = await supabase.from('_test_connection').select('*').limit(1).single();
+
+        /*
+         * PGRST116 means no rows found - this is OK
+         * 42P01 means table doesn't exist - also OK for new projects
+         */
+        if (testError && !['PGRST116', '42P01'].includes(testError.code || '')) {
+          console.error('Supabase connection error:', testError);
+          return false;
+        }
+
+        return true;
       }
-    } else if (tableError) {
+
       console.error('Supabase connection error:', tableError);
+
       return false;
     }
-    
+
     return true;
   } catch (error) {
     console.error('Failed to verify Supabase connection:', error);
@@ -96,6 +104,7 @@ export function generateProjectRef(description: string): string {
 
   // Take first 20 chars of sanitized description, or pad if too short
   let prefix = sanitized.slice(0, 20);
+
   if (prefix.length < 20) {
     prefix = prefix.padEnd(20, 'a');
   }

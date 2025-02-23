@@ -1,8 +1,9 @@
 import { getSupabaseConfig } from './supabase';
 import { createClient } from '@supabase/supabase-js';
-import { writeFile } from '~/utils/fileUtils';
+import { writeFile, readFile } from '~/utils/fileUtils';
 import { WORK_DIR } from '~/utils/constants';
 import { path } from '~/utils/path';
+import type { PackageJson } from '~/types/package';
 
 interface MigrationResult {
   success: boolean;
@@ -11,6 +12,7 @@ interface MigrationResult {
 
 export async function getSupabaseIntegrationDetails() {
   const config = getSupabaseConfig();
+
   if (!config) {
     throw new Error('No Supabase configuration found. Please connect to Supabase first.');
   }
@@ -23,7 +25,7 @@ export async function getSupabaseIntegrationDetails() {
 
 export async function writeSupabaseEnvFile(projectPath: string = WORK_DIR): Promise<void> {
   const config = await getSupabaseIntegrationDetails();
-  
+
   const envContent = `SUPABASE_URL=${config.projectUrl}
 SUPABASE_ANON_KEY=${config.anonKey}
 `;
@@ -41,11 +43,11 @@ export async function executeMigrations(migrations: string[]): Promise<Migration
   for (const migration of migrations) {
     try {
       const { error } = await supabase.rpc('execute_sql', { sql_query: migration });
-      
+
       if (error) {
         results.push({
           success: false,
-          error: error.message
+          error: error.message,
         });
         continue;
       }
@@ -54,7 +56,7 @@ export async function executeMigrations(migrations: string[]): Promise<Migration
     } catch (error) {
       results.push({
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error executing migration'
+        error: error instanceof Error ? error.message : 'Unknown error executing migration',
       });
     }
   }
@@ -64,7 +66,7 @@ export async function executeMigrations(migrations: string[]): Promise<Migration
 
 export async function generateSupabaseClient(projectPath: string = WORK_DIR): Promise<string> {
   const config = await getSupabaseIntegrationDetails();
-  
+
   const clientCode = `import { createClient } from '@supabase/supabase-js'
 
 const supabaseUrl = '${config.projectUrl}'
@@ -74,6 +76,7 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey)
 `;
 
   await writeFile(path.join(projectPath, 'src', 'supabaseClient.ts'), clientCode);
+
   return 'src/supabaseClient.ts';
 }
 
@@ -86,7 +89,8 @@ export async function setupSupabaseProject(projectPath: string = WORK_DIR): Prom
 
   // Add Supabase dependencies to package.json
   const packageJsonPath = path.join(projectPath, 'package.json');
-  const packageJson = require(packageJsonPath);
+  const packageJsonContent = await readFile(packageJsonPath, 'utf-8');
+  const packageJson = JSON.parse(packageJsonContent) as PackageJson;
 
   if (!packageJson.dependencies) {
     packageJson.dependencies = {};

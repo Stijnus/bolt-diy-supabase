@@ -1,11 +1,8 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { toast } from 'react-toastify';
-import { Switch } from '~/components/ui/Switch';
 import { Button } from '~/components/ui/Button';
-import { Input } from '~/components/ui/Input';
-import { getSupabaseConfig, setSupabaseConfig, clearSupabaseConfig, createSupabaseClient } from '~/lib/database/supabase';
-import { classNames } from '~/utils/classNames';
+import { getSupabaseConfig, clearSupabaseConfig, createSupabaseClient } from '~/lib/database/supabase';
 import ManagementKeyTab from './ManagementKeyTab';
 
 export default function SupabaseTab() {
@@ -29,19 +26,34 @@ export default function SupabaseTab() {
 
     try {
       const supabase = createSupabaseClient();
-      
+
       // Get table list
-      const { data: tables } = await supabase.rpc('get_table_info');
-      
+      const { data: tables, error } = await supabase.rpc('get_table_info');
+
+      if (error) {
+        // Handle case where function doesn't exist yet
+        if (error.code === 'PGRST202') {
+          setProjectStats({
+            tables: 0,
+            size: '0 Bytes',
+            rows: 0,
+          });
+          return;
+        }
+
+        throw error;
+      }
+
       if (tables) {
         setProjectStats({
           tables: tables.length,
           size: formatBytes(tables.reduce((acc: number, table: any) => acc + table.size, 0)),
-          rows: tables.reduce((acc: number, table: any) => acc + table.row_count, 0)
+          rows: tables.reduce((acc: number, table: any) => acc + table.row_count, 0),
         });
       }
     } catch (error) {
       console.error('Failed to load project stats:', error);
+      toast.error('Failed to load project statistics');
     } finally {
       setIsLoading(false);
     }
@@ -54,10 +66,14 @@ export default function SupabaseTab() {
   };
 
   const formatBytes = (bytes: number) => {
-    if (bytes === 0) return '0 Bytes';
+    if (bytes === 0) {
+      return '0 Bytes';
+    }
+
     const k = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
+
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
@@ -114,15 +130,21 @@ export default function SupabaseTab() {
                 <div className="grid grid-cols-3 gap-4">
                   <div className="p-4 bg-[#F8F8F8] dark:bg-[#1A1A1A] rounded-lg">
                     <div className="text-sm text-bolt-elements-textSecondary">Tables</div>
-                    <div className="text-2xl font-semibold mt-1 text-bolt-elements-textPrimary">{projectStats.tables}</div>
+                    <div className="text-2xl font-semibold mt-1 text-bolt-elements-textPrimary">
+                      {projectStats.tables}
+                    </div>
                   </div>
                   <div className="p-4 bg-[#F8F8F8] dark:bg-[#1A1A1A] rounded-lg">
                     <div className="text-sm text-bolt-elements-textSecondary">Total Rows</div>
-                    <div className="text-2xl font-semibold mt-1 text-bolt-elements-textPrimary">{projectStats.rows}</div>
+                    <div className="text-2xl font-semibold mt-1 text-bolt-elements-textPrimary">
+                      {projectStats.rows}
+                    </div>
                   </div>
                   <div className="p-4 bg-[#F8F8F8] dark:bg-[#1A1A1A] rounded-lg">
                     <div className="text-sm text-bolt-elements-textSecondary">Database Size</div>
-                    <div className="text-2xl font-semibold mt-1 text-bolt-elements-textPrimary">{projectStats.size}</div>
+                    <div className="text-2xl font-semibold mt-1 text-bolt-elements-textPrimary">
+                      {projectStats.size}
+                    </div>
                   </div>
                 </div>
               </div>

@@ -67,3 +67,16 @@ export const mkdir = async (path: string, options?: { recursive?: boolean }): Pr
     }
   }
 };
+
+export async function readFile(path: string, encoding: BufferEncoding = 'utf-8'): Promise<string> {
+  try {
+    const response = await fetch(path);
+    if (!response.ok) {
+      throw new Error(`Failed to read file: ${path}`);
+    }
+    return response.text();
+  } catch (error) {
+    console.error('Error reading file:', error);
+    throw error;
+  }
+}

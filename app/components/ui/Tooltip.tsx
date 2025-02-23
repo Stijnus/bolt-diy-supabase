@@ -1,79 +1,59 @@
-import * as Tooltip from '@radix-ui/react-tooltip';
-import { forwardRef, type ForwardedRef, type ReactElement } from 'react';
+import * as React from 'react';
+import * as TooltipPrimitive from '@radix-ui/react-tooltip';
+import { cn } from '~/utils/classNames';
 
 interface TooltipProps {
-  tooltip: React.ReactNode;
-  children: ReactElement;
-  sideOffset?: number;
+  children: React.ReactNode;
+  content?: React.ReactNode;
+  tooltip?: React.ReactNode; // For backward compatibility
   className?: string;
-  arrowClassName?: string;
-  tooltipStyle?: React.CSSProperties;
   position?: 'top' | 'bottom' | 'left' | 'right';
-  maxWidth?: number;
-  delay?: number;
+  sideOffset?: number;
 }
 
-const WithTooltip = forwardRef(
-  (
-    {
-      tooltip,
-      children,
-      sideOffset = 5,
-      className = '',
-      arrowClassName = '',
-      tooltipStyle = {},
-      position = 'top',
-      maxWidth = 250,
-      delay = 0,
-    }: TooltipProps,
-    _ref: ForwardedRef<HTMLElement>,
-  ) => {
-    return (
-      <Tooltip.Root delayDuration={delay}>
-        <Tooltip.Trigger asChild>{children}</Tooltip.Trigger>
-        <Tooltip.Portal>
-          <Tooltip.Content
-            side={position}
-            className={`
-              z-[2000]
-              px-2.5
-              py-1.5
-              max-h-[300px]
-              select-none
-              rounded-md
-              bg-bolt-elements-background-depth-3
-              text-bolt-elements-textPrimary
-              text-sm
-              leading-tight
-              shadow-lg
-              animate-in
-              fade-in-0
-              zoom-in-95
-              data-[state=closed]:animate-out
-              data-[state=closed]:fade-out-0
-              data-[state=closed]:zoom-out-95
-              ${className}
-            `}
-            sideOffset={sideOffset}
-            style={{
-              maxWidth,
-              ...tooltipStyle,
-            }}
-          >
-            <div className="break-words">{tooltip}</div>
-            <Tooltip.Arrow
-              className={`
-                fill-bolt-elements-background-depth-3
-                ${arrowClassName}
-              `}
-              width={12}
-              height={6}
-            />
-          </Tooltip.Content>
-        </Tooltip.Portal>
-      </Tooltip.Root>
-    );
-  },
-);
+const TooltipProvider = TooltipPrimitive.Provider;
+const TooltipRoot = TooltipPrimitive.Root;
+const TooltipTrigger = TooltipPrimitive.Trigger;
 
+const TooltipContent = React.forwardRef<
+  React.ElementRef<typeof TooltipPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof TooltipPrimitive.Content>
+>(({ className, sideOffset = 4, ...props }, ref) => (
+  <TooltipPrimitive.Content
+    ref={ref}
+    sideOffset={sideOffset}
+    className={cn(
+      'z-50 overflow-hidden rounded-md bg-bolt-background px-3 py-2 text-sm shadow-md border border-bolt-border',
+      className,
+    )}
+    {...props}
+  />
+));
+TooltipContent.displayName = TooltipPrimitive.Content.displayName;
+
+// Create a default Tooltip component
+const WithTooltip: React.FC<TooltipProps> = ({
+  children,
+  content,
+  tooltip,
+  className,
+  position = 'top',
+  sideOffset = 4,
+}) => {
+  const tooltipContent = content || tooltip; // Use content prop, fall back to tooltip prop
+
+  return (
+    <TooltipProvider>
+      <TooltipRoot>
+        <TooltipTrigger asChild>{children}</TooltipTrigger>
+        <TooltipContent side={position} sideOffset={sideOffset} className={className}>
+          {tooltipContent}
+        </TooltipContent>
+      </TooltipRoot>
+    </TooltipProvider>
+  );
+};
+
+// Export both the composed component and individual parts
+export { TooltipProvider, TooltipRoot as Tooltip, TooltipTrigger, TooltipContent };
 export default WithTooltip;
