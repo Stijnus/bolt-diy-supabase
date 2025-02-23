@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useStore } from '@nanostores/react';
 import { Switch } from '@radix-ui/react-switch';
@@ -11,6 +11,7 @@ import { useFeatures } from '~/lib/hooks/useFeatures';
 import { useNotifications } from '~/lib/hooks/useNotifications';
 import { useConnectionStatus } from '~/lib/hooks/useConnectionStatus';
 import { useDebugStatus } from '~/lib/hooks/useDebugStatus';
+import ManagementKeyTab from '../tabs/supabase/ManagementKeyTab';
 import {
   tabConfigurationStore,
   developerModeStore,
@@ -19,7 +20,7 @@ import {
 } from '~/lib/stores/settings';
 import { profileStore } from '~/lib/stores/profile';
 import type { TabType, TabVisibilityConfig, Profile } from './types';
-import { TAB_LABELS, DEFAULT_TAB_CONFIG } from './constants';
+import { TAB_LABELS, TAB_DESCRIPTIONS, DEFAULT_TAB_CONFIG } from './constants';
 import { DialogTitle } from '~/components/ui/Dialog';
 import { AvatarDropdown } from './AvatarDropdown';
 import BackgroundRays from '~/components/ui/BackgroundRays';
@@ -33,55 +34,12 @@ import DataTab from '~/components/@settings/tabs/data/DataTab';
 import DebugTab from '~/components/@settings/tabs/debug/DebugTab';
 import { EventLogsTab } from '~/components/@settings/tabs/event-logs/EventLogsTab';
 import UpdateTab from '~/components/@settings/tabs/update/UpdateTab';
-import ConnectionsTab from '~/components/@settings/tabs/connections/ConnectionsTab';
+import SupabaseTab from '~/components/@settings/tabs/supabase/SupabaseTab';
 import CloudProvidersTab from '~/components/@settings/tabs/providers/cloud/CloudProvidersTab';
 import ServiceStatusTab from '~/components/@settings/tabs/providers/status/ServiceStatusTab';
 import LocalProvidersTab from '~/components/@settings/tabs/providers/local/LocalProvidersTab';
 import TaskManagerTab from '~/components/@settings/tabs/task-manager/TaskManagerTab';
-
-interface ControlPanelProps {
-  open: boolean;
-  onClose: () => void;
-}
-
-interface TabWithDevType extends TabVisibilityConfig {
-  isExtraDevTab?: boolean;
-}
-
-interface ExtendedTabConfig extends TabVisibilityConfig {
-  isExtraDevTab?: boolean;
-}
-
-interface BaseTabConfig {
-  id: TabType;
-  visible: boolean;
-  window: 'user' | 'developer';
-  order: number;
-}
-
-interface AnimatedSwitchProps {
-  checked: boolean;
-  onCheckedChange: (checked: boolean) => void;
-  id: string;
-  label: string;
-}
-
-const TAB_DESCRIPTIONS: Record<TabType, string> = {
-  profile: 'Manage your profile and account settings',
-  settings: 'Configure application preferences',
-  notifications: 'View and manage your notifications',
-  features: 'Explore new and upcoming features',
-  data: 'Manage your data and storage',
-  'cloud-providers': 'Configure cloud AI providers and models',
-  'local-providers': 'Configure local AI providers and models',
-  'service-status': 'Monitor cloud LLM service status',
-  connection: 'Check connection status and settings',
-  debug: 'Debug tools and system information',
-  'event-logs': 'View system events and logs',
-  update: 'Check for updates and release notes',
-  'task-manager': 'Monitor system resources and processes',
-  'tab-management': 'Configure visible tabs and their order',
-};
+import ConnectionsTab from '~/components/@settings/tabs/connections/ConnectionsTab';
 
 // Beta status for experimental features
 const BETA_TABS = new Set<TabType>(['task-manager', 'service-status', 'update', 'local-providers']);
@@ -92,65 +50,10 @@ const BetaLabel = () => (
   </div>
 );
 
-const AnimatedSwitch = ({ checked, onCheckedChange, id, label }: AnimatedSwitchProps) => {
-  return (
-    <div className="flex items-center gap-2">
-      <Switch
-        id={id}
-        checked={checked}
-        onCheckedChange={onCheckedChange}
-        className={classNames(
-          'relative inline-flex h-6 w-11 items-center rounded-full',
-          'transition-all duration-300 ease-[cubic-bezier(0.87,_0,_0.13,_1)]',
-          'bg-gray-200 dark:bg-gray-700',
-          'data-[state=checked]:bg-purple-500',
-          'focus:outline-none focus:ring-2 focus:ring-purple-500/20',
-          'cursor-pointer',
-          'group',
-        )}
-      >
-        <motion.span
-          className={classNames(
-            'absolute left-[2px] top-[2px]',
-            'inline-block h-5 w-5 rounded-full',
-            'bg-white shadow-lg',
-            'transition-shadow duration-300',
-            'group-hover:shadow-md group-active:shadow-sm',
-            'group-hover:scale-95 group-active:scale-90',
-          )}
-          initial={false}
-          transition={{
-            type: 'spring',
-            stiffness: 500,
-            damping: 30,
-            duration: 0.2,
-          }}
-          animate={{
-            x: checked ? '1.25rem' : '0rem',
-          }}
-        >
-          <motion.div
-            className="absolute inset-0 rounded-full bg-white"
-            initial={false}
-            animate={{
-              scale: checked ? 1 : 0.8,
-            }}
-            transition={{ duration: 0.2 }}
-          />
-        </motion.span>
-        <span className="sr-only">Toggle {label}</span>
-      </Switch>
-      <div className="flex items-center gap-2">
-        <label
-          htmlFor={id}
-          className="text-sm text-gray-500 dark:text-gray-400 select-none cursor-pointer whitespace-nowrap w-[88px]"
-        >
-          {label}
-        </label>
-      </div>
-    </div>
-  );
-};
+interface ControlPanelProps {
+  open: boolean;
+  onClose: () => void;
+}
 
 export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
   // State
@@ -189,7 +92,7 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
     // In developer mode, show ALL tabs without restrictions
     if (developerMode) {
       const seenTabs = new Set<TabType>();
-      const devTabs: ExtendedTabConfig[] = [];
+      const devTabs: TabVisibilityConfig[] = [];
 
       // Process tabs in order of priority: developer, user, default
       const processTab = (tab: BaseTabConfig) => {
@@ -319,6 +222,8 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
         return <FeaturesTab />;
       case 'data':
         return <DataTab />;
+      case 'supabase':
+        return <SupabaseTab />;
       case 'cloud-providers':
         return <CloudProvidersTab />;
       case 'local-providers':
@@ -467,12 +372,59 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
                   <div className="flex items-center gap-6">
                     {/* Mode Toggle */}
                     <div className="flex items-center gap-2 min-w-[140px] border-r border-gray-200 dark:border-gray-800 pr-6">
-                      <AnimatedSwitch
+                      <Switch
                         id="developer-mode"
                         checked={developerMode}
                         onCheckedChange={handleDeveloperModeChange}
-                        label={developerMode ? 'Developer Mode' : 'User Mode'}
-                      />
+                        className={classNames(
+                          'relative inline-flex h-6 w-11 items-center rounded-full',
+                          'transition-all duration-300 ease-[cubic-bezier(0.87,_0,_0.13,_1)]',
+                          'bg-gray-200 dark:bg-gray-700',
+                          'data-[state=checked]:bg-purple-500',
+                          'focus:outline-none focus:ring-2 focus:ring-purple-500/20',
+                          'cursor-pointer',
+                          'group',
+                        )}
+                      >
+                        <motion.span
+                          className={classNames(
+                            'absolute left-[2px] top-[2px]',
+                            'inline-block h-5 w-5 rounded-full',
+                            'bg-white shadow-lg',
+                            'transition-shadow duration-300',
+                            'group-hover:shadow-md group-active:shadow-sm',
+                            'group-hover:scale-95 group-active:scale-90',
+                          )}
+                          initial={false}
+                          transition={{
+                            type: 'spring',
+                            stiffness: 500,
+                            damping: 30,
+                            duration: 0.2,
+                          }}
+                          animate={{
+                            x: developerMode ? '1.25rem' : '0rem',
+                          }}
+                        >
+                          <motion.div
+                            className="absolute inset-0 rounded-full bg-white"
+                            initial={false}
+                            animate={{
+                              scale: developerMode ? 1 : 0.8,
+                            }}
+                            transition={{ duration: 0.2 }}
+                          />
+                        </motion.span>
+                        <span className="sr-only">Toggle {developerMode ? 'Developer Mode' : 'User Mode'}</span>
+                      </Switch>
+                      <div className="flex items-center gap-2">
+                        <label
+                          htmlFor="developer-mode"
+                          className="text-sm text-gray-500 dark:text-gray-400 select-none cursor-pointer whitespace-nowrap w-[88px]"
+                        >
+                          {developerMode ? 'Developer Mode' : 'User Mode'}
+                        </label>
+                      </div>
                     </div>
 
                     {/* Avatar and Dropdown */}
@@ -500,6 +452,7 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
                     'scrollbar-track-transparent',
                     'scrollbar-thumb-[#E5E5E5] hover:scrollbar-thumb-[#CCCCCC]',
                     'dark:scrollbar-thumb-[#333333] dark:hover:scrollbar-thumb-[#444444]',
+                    'scrollbar-thumb-rounded-full',
                     'will-change-scroll',
                     'touch-auto',
                   )}
@@ -524,7 +477,7 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
                         animate="visible"
                       >
                         <AnimatePresence mode="popLayout">
-                          {(visibleTabs as TabWithDevType[]).map((tab: TabWithDevType) => (
+                          {visibleTabs.map((tab) => (
                             <motion.div key={tab.id} layout variants={itemVariants} className="aspect-[1.5/1]">
                               <TabTile
                                 tab={tab}
