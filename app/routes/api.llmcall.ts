@@ -8,6 +8,7 @@ import { LLMManager } from '~/lib/modules/llm/manager';
 import type { ModelInfo } from '~/lib/modules/llm/types';
 import { getApiKeysFromCookie, getProviderSettingsFromCookie } from '~/lib/api/cookies';
 import { createScopedLogger } from '~/utils/logger';
+import { getDatabaseContextForLLM, generateDatabaseSystemPrompt } from '~/lib/database/context';
 
 export async function action(args: ActionFunctionArgs) {
   return llmCallAction(args);
@@ -54,11 +55,15 @@ async function llmCallAction({ context, request }: ActionFunctionArgs) {
   const apiKeys = getApiKeysFromCookie(cookieHeader);
   const providerSettings = getProviderSettingsFromCookie(cookieHeader);
 
+  // Get database context if available
+  const databaseContext = await getDatabaseContextForLLM();
+  const systemPrompt = databaseContext ? generateDatabaseSystemPrompt(databaseContext, system) : system;
+
   if (streamOutput) {
     try {
       const result = await streamText({
         options: {
-          system,
+          system: systemPrompt,
         },
         messages: [
           {
@@ -112,7 +117,7 @@ async function llmCallAction({ context, request }: ActionFunctionArgs) {
       logger.info(`Generating response Provider: ${provider.name}, Model: ${modelDetails.name}`);
 
       const result = await generateText({
-        system,
+        system: systemPrompt,
         messages: [
           {
             role: 'user',

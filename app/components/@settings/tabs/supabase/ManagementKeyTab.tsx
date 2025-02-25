@@ -5,6 +5,14 @@ import { Button } from '~/components/ui/Button';
 import { Input } from '~/components/ui/Input';
 import { getManagementKey, setManagementKey, clearManagementKey } from '~/lib/database/management';
 
+// Add these interfaces at the top of the file
+interface ApiResponse {
+  data?: any;
+  error?: {
+    message: string;
+  };
+}
+
 export default function ManagementKeyTab() {
   const [managementKey, setKey] = useState('');
   const [isEditing, setIsEditing] = useState(false);
@@ -19,13 +27,23 @@ export default function ManagementKeyTab() {
     }
   }, []);
 
+  const validateManagementKey = (key: string): boolean => {
+    return /^sbp_[a-zA-Z0-9]{40,}$/.test(key.trim());
+  };
+
   const handleSave = () => {
-    if (!managementKey.trim()) {
+    const trimmedKey = managementKey.trim();
+
+    if (!trimmedKey) {
       toast.error('Please enter a management key');
       return;
     }
 
-    setManagementKey(managementKey.trim());
+    if (!validateManagementKey(trimmedKey)) {
+      toast.warning("The key format doesn't look like a valid Supabase management key");
+    }
+
+    setManagementKey(trimmedKey);
     setIsEditing(false);
     setHasKey(true);
     toast.success('Management key saved successfully');
@@ -39,6 +57,39 @@ export default function ManagementKeyTab() {
     toast.success('Management key removed');
   };
 
+  const testKey = async (key: string) => {
+    try {
+      toast.info('Testing management key...');
+
+      const response = await fetch('/api/supabase', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Supabase-Management-Key': key,
+        },
+        body: JSON.stringify({
+          path: '/organizations',
+          method: 'GET',
+        }),
+      });
+
+      const data = (await response.json()) as ApiResponse;
+
+      if (!response.ok) {
+        throw new Error(data.error?.message || 'Invalid management key');
+      }
+
+      toast.success('Management key is valid!');
+
+      return true;
+    } catch (error) {
+      console.error('Key test failed:', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to validate management key');
+
+      return false;
+    }
+  };
+
   return (
     <div className="space-y-6">
       <motion.div
@@ -48,20 +99,20 @@ export default function ManagementKeyTab() {
         transition={{ duration: 0.3 }}
       >
         <div className="flex items-center gap-2">
-          <div className="i-ph:key-duotone text-xl text-purple-500" />
+          <div className="i-ph:key-duotone text-xl text-accent-500" />
           <h2 className="text-lg font-medium text-bolt-elements-textPrimary">Supabase Management</h2>
         </div>
 
-        <div className="bg-white dark:bg-[#0A0A0A] rounded-lg p-6 border border-[#E5E5E5] dark:border-[#1A1A1A]">
+        <div className="bg-bolt-elements-bg-depth-1 rounded-lg p-6 border border-bolt-elements-borderColor shadow-sm">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h3 className="text-base font-medium text-bolt-elements-textPrimary">Management API Key</h3>
+              <h3 className="text-lg font-medium text-bolt-elements-textPrimary">Management API Key</h3>
               <p className="text-sm text-bolt-elements-textSecondary mt-1">Required for automatic project creation</p>
             </div>
             {hasKey && !isEditing && (
               <div className="flex items-center gap-2">
-                <div className="w-2 h-2 bg-green-500 rounded-full" />
-                <span className="text-sm text-green-500">Configured</span>
+                <div className="w-2 h-2 bg-bolt-elements-icon-success rounded-full animate-pulse" />
+                <span className="text-sm text-bolt-elements-icon-success">Configured</span>
               </div>
             )}
           </div>
@@ -70,6 +121,7 @@ export default function ManagementKeyTab() {
             <div className="space-y-4">
               <Input
                 type="password"
+                className="bg-bolt-elements-bg-depth-2 border-bolt-elements-borderColor text-bolt-elements-textPrimary"
                 value={managementKey}
                 onChange={(e) => setKey(e.target.value)}
                 placeholder="Enter your Supabase management API key"
@@ -100,7 +152,7 @@ export default function ManagementKeyTab() {
                     </Button>
                     <Button
                       variant="outline"
-                      className="text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950"
+                      className="text-bolt-elements-icon-error hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950"
                       onClick={handleRemove}
                     >
                       Remove
@@ -115,7 +167,17 @@ export default function ManagementKeyTab() {
             </div>
           )}
 
-          <div className="mt-4 p-4 bg-[#F8F8F8] dark:bg-[#1A1A1A] rounded-lg">
+          {hasKey && !isEditing && (
+            <Button
+              variant="outline"
+              className="text-bolt-elements-textPrimary hover:bg-bolt-elements-bg-depth-2 border-bolt-elements-borderColor mt-4"
+              onClick={() => testKey(managementKey)}
+            >
+              Test Key
+            </Button>
+          )}
+
+          <div className="mt-4 p-4 bg-bolt-elements-bg-depth-2 rounded-lg">
             <h4 className="text-sm font-medium text-bolt-elements-textPrimary mb-2">About Management API Keys</h4>
             <p className="text-sm text-bolt-elements-textSecondary">
               The management API key allows Bolt to automatically create and configure Supabase projects for your chats.
@@ -124,7 +186,7 @@ export default function ManagementKeyTab() {
                 href="https://supabase.com/dashboard/account/tokens"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-purple-500 hover:underline"
+                className="text-accent-500 hover:underline"
               >
                 Supabase Dashboard
               </a>
