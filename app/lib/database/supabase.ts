@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { nanoid } from 'nanoid';
+import { encrypt, decrypt } from '~/utils/encryption';
 
 // Handles storing and retrieving Supabase configuration
 export interface SupabaseConfig {
@@ -7,14 +8,40 @@ export interface SupabaseConfig {
   apiKey: string;
 }
 
-// Store Supabase config in localStorage
+// Store Supabase config in localStorage with encryption
 const SUPABASE_CONFIG_KEY = 'bolt_supabase_config';
+const CONFIG_VERSION = '1.0.0'; // Add versioning
+
+interface StoredConfig extends SupabaseConfig {
+  version: string;
+  timestamp: number;
+}
 
 // Core functions for config management
 export function getSupabaseConfig(): SupabaseConfig | null {
   try {
-    const config = localStorage.getItem(SUPABASE_CONFIG_KEY);
-    return config ? JSON.parse(config) : null;
+    const encryptedConfig = localStorage.getItem(SUPABASE_CONFIG_KEY);
+
+    if (!encryptedConfig) {
+      return null;
+    }
+
+    const decryptedConfig = decrypt(encryptedConfig);
+    const config = JSON.parse(decryptedConfig) as StoredConfig;
+
+    // Version check for future migrations
+    if (config.version !== CONFIG_VERSION) {
+      console.warn('Config version mismatch, clearing old config');
+      clearSupabaseConfig();
+
+      return null;
+    }
+
+    // Return only the necessary config fields
+    return {
+      projectUrl: config.projectUrl,
+      apiKey: config.apiKey,
+    };
   } catch (error) {
     console.error('Error reading Supabase config:', error);
     return null;
@@ -23,9 +50,17 @@ export function getSupabaseConfig(): SupabaseConfig | null {
 
 export function setSupabaseConfig(config: SupabaseConfig) {
   try {
-    localStorage.setItem(SUPABASE_CONFIG_KEY, JSON.stringify(config));
+    const configToStore: StoredConfig = {
+      ...config,
+      version: CONFIG_VERSION,
+      timestamp: Date.now(),
+    };
+
+    const encryptedConfig = encrypt(JSON.stringify(configToStore));
+    localStorage.setItem(SUPABASE_CONFIG_KEY, encryptedConfig);
   } catch (error) {
     console.error('Error saving Supabase config:', error);
+    throw new Error('Failed to save Supabase configuration securely');
   }
 }
 
@@ -59,46 +94,41 @@ export async function verifySupabaseConnection(config: SupabaseConfig): Promise<
       },
     });
 
-    // For new projects, just try a simple connection test
+    // For new projects, use a more reliable connection test
     try {
-      // Try to get version info - this should work on any Supabase project
-      const { error } = await supabase.rpc('get_service_role');
+      // Try a simple version check first
+      const { error: versionError } = await supabase.rpc('version');
 
-      // If we get a specific error about the function not existing, that's expected
-      if (error && error.code === 'PGRST202') {
-        // Try a simple query instead
-        const { error: tableError } = await supabase.from('_sentinel_check_').select('count').limit(1);
-
-        /*
-         * PGRST116 means no rows found - this is OK
-         * 42P01 means table doesn't exist - also OK for new projects
-         */
-        if (tableError && !['PGRST116', '42P01'].includes(tableError.code || '')) {
-          console.warn('Secondary connection test failed:', tableError);
-
-          // Try one more basic test - this should work on any Postgres database
-          const { error: versionError } = await supabase.rpc('version');
-
-          if (versionError && versionError.code !== 'PGRST202') {
-            console.error('Final connection test failed:', versionError);
-            return false;
-          }
-        }
-
-        // If we got here, the connection is probably valid
+      if (!versionError || versionError.code === 'PGRST202') {
+        console.log('Connection verified via version RPC');
         return true;
       }
 
-      // If we got data or no specific error, connection is valid
-      return true;
+      // Try a simple health check query
+      const { error: healthError } = await supabase.from('_sentinel_check_').select('count').limit(1);
+
+      if (!healthError || healthError.code === 'PGRST116' || healthError.code === '42P01') {
+        console.log('Connection verified via sentinel check');
+        return true;
+      }
+
+      // If we can at least connect to the API, consider it connected
+      const { error: apiError } = await supabase.from('_fake_table_to_test_connection_').select('count').limit(1);
+
+      if (apiError && apiError.code === '42P01') {
+        // Table doesn't exist error means we could connect to the database
+        console.log('Connection verified via API check');
+        return true;
+      }
+
+      console.error('All connection tests failed');
+      return false;
     } catch (error) {
       console.error('Failed to verify Supabase connection:', error);
-
-      // Be lenient - if we can connect at all, consider it valid
-      return true;
+      return false;
     }
   } catch (error) {
-    console.error('Failed to verify Supabase connection:', error);
+    console.error('Failed to create Supabase client:', error);
     return false;
   }
 }

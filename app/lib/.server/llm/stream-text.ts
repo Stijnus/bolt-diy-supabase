@@ -9,6 +9,7 @@ import { LLMManager } from '~/lib/modules/llm/manager';
 import { createScopedLogger } from '~/utils/logger';
 import { createFilesContext, extractPropertiesFromMessage } from './utils';
 import { getFilePaths } from './select-context';
+import { getDatabaseContextForLLM, generateDatabaseSystemPrompt } from '~/lib/database/context';
 
 export type Messages = Message[];
 
@@ -41,6 +42,11 @@ export async function streamText(props: {
     contextFiles,
     summary,
   } = props;
+
+  // Get database context first
+  const databaseContext = await getDatabaseContextForLLM();
+  logger.debug('Database Context:', JSON.stringify(databaseContext, null, 2));
+
   let currentModel = DEFAULT_MODEL;
   let currentProvider = DEFAULT_PROVIDER.name;
   let processedMessages = messages.map((message) => {
@@ -92,12 +98,27 @@ export async function streamText(props: {
 
   const dynamicMaxTokens = modelDetails && modelDetails.maxTokenAllowed ? modelDetails.maxTokenAllowed : MAX_TOKENS;
 
+  // Get base prompt from library
   let systemPrompt =
-    PromptLibrary.getPropmtFromLibrary(promptId || 'default', {
+    (await PromptLibrary.getPropmtFromLibrary(promptId || 'default', {
       cwd: WORK_DIR,
       allowedHtmlElements: allowedHTMLElements,
       modificationTagName: MODIFICATIONS_TAG_NAME,
-    }) ?? getSystemPrompt();
+    })) ?? getSystemPrompt();
+
+  logger.debug('Using prompt template:', promptId || 'default');
+
+  // Add database context if available
+  if (databaseContext) {
+    const dbPrompt = generateDatabaseSystemPrompt(databaseContext, '');
+    logger.debug('Database Prompt:', dbPrompt);
+
+    // Make database context more prominent by adding it at the start
+    systemPrompt = `${dbPrompt}\n\n${systemPrompt}`;
+
+    // Add a reminder at the end
+    systemPrompt += `\n\nREMINDER: You have an active Supabase database connection at ${databaseContext.projectUrl}. Always check your database context before making API calls.`;
+  }
 
   if (files && contextFiles && contextOptimization) {
     const codeContext = createFilesContext(contextFiles, true);
@@ -138,8 +159,6 @@ ${props.summary}
   }
 
   logger.info(`Sending llm call to ${provider.name} with model ${modelDetails.name}`);
-
-  // console.log(systemPrompt,processedMessages);
 
   return await _streamText({
     model: provider.getModelInstance({

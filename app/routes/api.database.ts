@@ -35,15 +35,17 @@ export async function action({ request }: ActionFunctionArgs) {
     const { action, ...params } = body;
 
     switch (action) {
-      case 'check_connection':
+      case 'check_connection': {
         const isConnected = await checkDatabaseConnection();
         return json({ success: isConnected });
+      }
 
-      case 'list_tables':
+      case 'list_tables': {
         const tables = await listDatabaseTables();
         return json(tables);
+      }
 
-      case 'create_table':
+      case 'create_table': {
         const { tableName, columns } = params;
 
         if (!tableName || !columns) {
@@ -57,9 +59,11 @@ export async function action({ request }: ActionFunctionArgs) {
         }
 
         const createResult = await createTable(tableName, columns);
-        return json(createResult);
 
-      case 'execute':
+        return json(createResult);
+      }
+
+      case 'execute': {
         const { operation } = params;
 
         if (!operation) {
@@ -73,7 +77,9 @@ export async function action({ request }: ActionFunctionArgs) {
         }
 
         const result = await executeDatabaseOperation(operation as DatabaseOperation);
+
         return json(result);
+      }
 
       default:
         return json(

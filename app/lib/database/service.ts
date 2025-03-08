@@ -1,5 +1,8 @@
 import { createSupabaseClient } from './supabase';
-import { PostgrestError } from '@supabase/supabase-js';
+import { PostgrestError, createClient, type SupabaseClient } from '@supabase/supabase-js';
+
+// Import types from single source to avoid conflicts
+import { validateSupabaseConfig } from './types';
 
 export interface DatabaseOperation {
   type: 'select' | 'insert' | 'update' | 'delete' | 'execute';
@@ -21,12 +24,210 @@ export interface DatabaseResponse<T = any> {
   };
 }
 
+interface RetryOptions {
+  maxAttempts: number;
+  initialDelay: number;
+  maxDelay: number;
+}
+
+const DEFAULT_RETRY_OPTIONS: RetryOptions = {
+  maxAttempts: 3,
+  initialDelay: 1000,
+  maxDelay: 5000,
+};
+
+async function retryOperation<T>(
+  operation: () => Promise<T>,
+  options: RetryOptions = DEFAULT_RETRY_OPTIONS,
+): Promise<T> {
+  let lastError: Error | null = null;
+  let delay = options.initialDelay;
+
+  for (let attempt = 1; attempt <= options.maxAttempts; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error as Error;
+
+      if (attempt === options.maxAttempts) {
+        break;
+      }
+
+      console.warn(`Operation failed (attempt ${attempt}/${options.maxAttempts}):`, error);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      delay = Math.min(delay * 2, options.maxDelay);
+    }
+  }
+
+  throw lastError || new Error('Operation failed after retries');
+}
+
+// Simple in-memory cache implementation
+interface CacheEntry<T> {
+  data: T;
+  timestamp: number;
+  ttl: number;
+}
+
+class RequestCache {
+  private _cache: Map<string, CacheEntry<any>> = new Map();
+  private static _instance: RequestCache;
+
+  private constructor() {
+    // Private constructor for singleton pattern
+  }
+
+  static getInstance(): RequestCache {
+    if (!RequestCache._instance) {
+      RequestCache._instance = new RequestCache();
+    }
+
+    return RequestCache._instance;
+  }
+
+  set<T>(key: string, data: T, ttlMs: number = 5000): void {
+    this._cache.set(key, {
+      data,
+      timestamp: Date.now(),
+      ttl: ttlMs,
+    });
+  }
+
+  get<T>(key: string): T | null {
+    const entry = this._cache.get(key);
+
+    if (!entry) {
+      return null;
+    }
+
+    if (Date.now() - entry.timestamp > entry.ttl) {
+      this._cache.delete(key);
+      return null;
+    }
+
+    return entry.data as T;
+  }
+
+  clear(): void {
+    this._cache.clear();
+  }
+}
+
+// Connection pool implementation
+class ConnectionPool {
+  private static _instance: ConnectionPool;
+  private _pool: Map<string, any> = new Map();
+  private _maxConnections: number = 5;
+  private _connectionTimeout: number = 30000; // 30 seconds
+
+  private constructor() {
+    // Cleanup expired connections periodically
+    setInterval(() => this._cleanup(), 60000);
+  }
+
+  static getInstance(): ConnectionPool {
+    if (!ConnectionPool._instance) {
+      ConnectionPool._instance = new ConnectionPool();
+    }
+
+    return ConnectionPool._instance;
+  }
+
+  async getConnection(config: { projectUrl: string; apiKey: string }): Promise<SupabaseClient> {
+    try {
+      // Validate config and get branded types
+      const validatedConfig = validateSupabaseConfig(config);
+      const key = `${validatedConfig.projectUrl}:${validatedConfig.apiKey}`;
+      let connection = this._pool.get(key);
+
+      if (!connection) {
+        if (this._pool.size >= this._maxConnections) {
+          // Remove oldest connection if pool is full
+          const oldestKey = this._pool.keys().next().value;
+
+          if (oldestKey) {
+            this._pool.delete(oldestKey);
+          }
+        }
+
+        // Create client with validated config
+        const client = createClient(validatedConfig.projectUrl.toString(), validatedConfig.apiKey.toString(), {
+          auth: {
+            persistSession: true,
+            autoRefreshToken: true,
+          },
+        });
+
+        connection = {
+          client,
+          lastUsed: Date.now(),
+        };
+        this._pool.set(key, connection);
+      }
+
+      connection.lastUsed = Date.now();
+
+      return connection.client;
+    } catch (error) {
+      console.error('Failed to create database connection:', error);
+      throw new Error('Failed to create database connection');
+    }
+  }
+
+  private _cleanup(): void {
+    const now = Date.now();
+
+    // Convert to array first to avoid iterator issues
+    Array.from(this._pool.entries()).forEach(([key, connection]) => {
+      if (now - connection.lastUsed > this._connectionTimeout) {
+        this._pool.delete(key);
+      }
+    });
+  }
+}
+
 /**
  * Execute a database operation through Supabase
  */
-export async function executeDatabaseOperation<T = any>(operation: DatabaseOperation): Promise<DatabaseResponse<T>> {
+export async function executeDatabaseOperation<T = any>(
+  operation: DatabaseOperation,
+  options: { cache?: boolean; ttl?: number } = {},
+): Promise<DatabaseResponse<T>> {
+  const cache = RequestCache.getInstance();
+  const pool = ConnectionPool.getInstance();
+
+  // Generate cache key for the operation
+  const cacheKey = JSON.stringify(operation);
+
+  // Check cache if enabled
+  if (options.cache) {
+    const cachedResult = cache.get<DatabaseResponse<T>>(cacheKey);
+
+    if (cachedResult) {
+      return cachedResult;
+    }
+  }
+
   try {
-    const supabase = createSupabaseClient();
+    const client = createSupabaseClient();
+    const supabaseUrl = (client as any).supabaseUrl;
+    const supabaseKey = (client as any).supabaseKey;
+
+    if (!supabaseUrl || !supabaseKey) {
+      return {
+        success: false,
+        error: {
+          message: 'Supabase configuration not found',
+          code: 'CONFIG_NOT_FOUND',
+        },
+      };
+    }
+
+    const supabase = await pool.getConnection({
+      projectUrl: supabaseUrl,
+      apiKey: supabaseKey,
+    });
+    let result: DatabaseResponse<T>;
 
     switch (operation.type) {
       case 'select': {
@@ -49,7 +250,8 @@ export async function executeDatabaseOperation<T = any>(operation: DatabaseOpera
           throw error;
         }
 
-        return { success: true, data } as DatabaseResponse<T>;
+        result = { success: true, data } as DatabaseResponse<T>;
+        break;
       }
 
       case 'insert': {
@@ -72,7 +274,8 @@ export async function executeDatabaseOperation<T = any>(operation: DatabaseOpera
           throw error;
         }
 
-        return { success: true, data } as DatabaseResponse<T>;
+        result = { success: true, data } as DatabaseResponse<T>;
+        break;
       }
 
       case 'update': {
@@ -96,7 +299,8 @@ export async function executeDatabaseOperation<T = any>(operation: DatabaseOpera
           throw error;
         }
 
-        return { success: true, data } as DatabaseResponse<T>;
+        result = { success: true, data } as DatabaseResponse<T>;
+        break;
       }
 
       case 'delete': {
@@ -120,7 +324,8 @@ export async function executeDatabaseOperation<T = any>(operation: DatabaseOpera
           throw error;
         }
 
-        return { success: true, data } as DatabaseResponse<T>;
+        result = { success: true, data } as DatabaseResponse<T>;
+        break;
       }
 
       case 'execute': {
@@ -140,7 +345,8 @@ export async function executeDatabaseOperation<T = any>(operation: DatabaseOpera
             throw error;
           }
 
-          return { success: true, data } as DatabaseResponse<T>;
+          result = { success: true, data } as DatabaseResponse<T>;
+          break;
         } catch (error) {
           // Fallback to REST API
           console.log('Falling back to direct SQL API:', error);
@@ -163,13 +369,14 @@ export async function executeDatabaseOperation<T = any>(operation: DatabaseOpera
             });
 
             if (!response.ok) {
-              const errorData = await response.json();
+              const errorData = (await response.json()) as { message?: string };
               throw new Error(errorData.message || 'SQL execution failed');
             }
 
             const data = await response.json();
 
-            return { success: true, data } as DatabaseResponse<T>;
+            result = { success: true, data } as DatabaseResponse<T>;
+            break;
           } catch (fetchError) {
             console.error('SQL execution failed:', fetchError);
             throw new Error('Failed to execute SQL query using REST API');
@@ -180,6 +387,12 @@ export async function executeDatabaseOperation<T = any>(operation: DatabaseOpera
       default:
         throw new Error(`Unsupported operation type: ${operation.type}`);
     }
+
+    if (options.cache) {
+      cache.set(cacheKey, result, options.ttl);
+    }
+
+    return result;
   } catch (error) {
     console.error('Database operation failed:', error);
 
@@ -203,29 +416,62 @@ export async function checkDatabaseConnection(): Promise<boolean> {
   try {
     const supabase = createSupabaseClient();
 
-    // Simple query to verify the connection
-    const { error } = await supabase.from('_metadata').select('*').limit(1).single();
-
-    if (error) {
-      // Try a simpler query if the metadata table doesn't exist
+    return await retryOperation(async () => {
       try {
-        const { error: simpleError } = await supabase.rpc('version');
+        // First try: Check system tables that exist in any PostgreSQL database
+        const { error: pgCatalogError } = await supabase.from('pg_catalog.pg_tables').select('schemaname').limit(1);
 
-        if (simpleError) {
-          console.error('Database connection check failed:', simpleError);
-          return false;
+        if (!pgCatalogError) {
+          console.log('Connection verified via pg_catalog.pg_tables');
+          return true;
         }
 
-        return true;
-      } catch (innerError) {
-        console.error('Database connection fallback check failed:', innerError);
-        return false;
-      }
-    }
+        console.warn('pg_catalog.pg_tables check failed:', pgCatalogError);
 
-    return true;
+        // Second try: Another system table
+        const { error: pgStatError } = await supabase.from('pg_stat_database').select('datname').limit(1);
+
+        if (!pgStatError) {
+          console.log('Connection verified via pg_stat_database');
+          return true;
+        }
+
+        console.warn('pg_stat_database check failed:', pgStatError);
+
+        // Third try: Information schema tables
+        const { error: infoSchemaError } = await supabase
+          .from('information_schema.tables')
+          .select('table_name')
+          .limit(1);
+
+        if (!infoSchemaError) {
+          console.log('Connection verified via information_schema.tables');
+          return true;
+        }
+
+        console.warn('information_schema.tables check failed:', infoSchemaError);
+
+        // Last resort: Try a simple RPC call that might exist
+        const { error: rpcError } = await supabase.rpc('version');
+
+        if (!rpcError) {
+          console.log('Connection verified via version RPC');
+          return true;
+        }
+
+        console.warn('version RPC check failed:', rpcError);
+
+        // All checks failed
+        console.error('All connection checks failed');
+
+        return false;
+      } catch (error) {
+        console.error('Connection check attempt failed:', error);
+        throw error;
+      }
+    });
   } catch (error) {
-    console.error('Database connection check error:', error);
+    console.error('Database connection check failed after retries:', error);
     return false;
   }
 }

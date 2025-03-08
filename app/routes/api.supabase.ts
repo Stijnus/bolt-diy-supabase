@@ -27,6 +27,29 @@ export async function action({ request }: ActionFunctionArgs) {
       return json({ error: 'Management key is required' }, { status: 401 });
     }
 
+    // Handle management key test action
+    if (action === 'test-management-key') {
+      try {
+        // Test the management key by making a simple request to list organizations
+        const testResponse = await fetch(`${SUPABASE_MANAGEMENT_API}/organizations`, {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${managementKey}`,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (!testResponse.ok) {
+          return json({ error: 'Invalid management key' }, { status: 401 });
+        }
+
+        return json({ success: true });
+      } catch (error) {
+        console.error('Management key test failed:', error);
+        return json({ error: 'Failed to verify management key' }, { status: 500 });
+      }
+    }
+
     // Regular API request handling
     if (!path) {
       console.error('Missing path in request');

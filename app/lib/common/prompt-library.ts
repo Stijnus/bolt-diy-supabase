@@ -1,5 +1,6 @@
 import { getSystemPrompt } from './prompts/prompts';
 import optimized from './prompts/optimized';
+import supabasePrompt from './prompts/supabase';
 
 export interface PromptOptions {
   cwd: string;
@@ -13,7 +14,7 @@ export class PromptLibrary {
     {
       label: string;
       description: string;
-      get: (options: PromptOptions) => string;
+      get: (options: PromptOptions) => string | Promise<string>;
     }
   > = {
     default: {
@@ -26,6 +27,11 @@ export class PromptLibrary {
       description: 'an Experimental version of the prompt for lower token usage',
       get: (options) => optimized(options),
     },
+    supabase: {
+      label: 'Supabase-Enabled Prompt',
+      description: 'Enhanced prompt with Supabase database interaction capabilities',
+      get: (options) => supabasePrompt(options),
+    },
   };
   static getList() {
     return Object.entries(this.library).map(([key, value]) => {
@@ -37,13 +43,15 @@ export class PromptLibrary {
       };
     });
   }
-  static getPropmtFromLibrary(promptId: string, options: PromptOptions) {
+  static async getPropmtFromLibrary(promptId: string, options: PromptOptions): Promise<string> {
     const prompt = this.library[promptId];
 
     if (!prompt) {
-      throw 'Prompt Now Found';
+      throw 'Prompt Not Found';
     }
 
-    return this.library[promptId]?.get(options);
+    const result = await prompt.get(options);
+
+    return result;
   }
 }

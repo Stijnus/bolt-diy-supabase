@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { toast } from 'react-toastify';
 import { Button } from '~/components/ui/Button';
-import { Dialog, DialogRoot, DialogTitle } from '~/components/ui/Dialog';
+import * as Dialog from '@radix-ui/react-dialog';
 import { Input } from '~/components/ui/Input';
 import {
   getSupabaseConfig,
@@ -11,7 +11,10 @@ import {
 } from '~/lib/database/supabase';
 import { getManagementKey, getAvailableRegions, type ProjectStatus } from '~/lib/database/management';
 import { setupInitialStructure } from '~/lib/database/setup';
-import { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from '~/components/ui/Tooltip';
+import WithTooltip, { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from '~/components/ui/Tooltip';
+import { getDatabaseContextForLLM } from '~/lib/database/context';
+import { motion } from 'framer-motion';
+import { classNames } from '~/utils/classNames';
 
 // Define a type for the regions
 interface Region {
@@ -35,8 +38,18 @@ interface Organization {
   name: string;
 }
 
-export function SupabaseConnectButton() {
-  const [isOpen, setIsOpen] = useState(false);
+interface SupabaseConnectButtonProps {
+  isOpen?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}
+
+export function SupabaseConnectButton({ isOpen: controlledIsOpen, onOpenChange }: SupabaseConnectButtonProps) {
+  const [internalIsOpen, setInternalIsOpen] = useState(false);
+
+  // Use controlled or uncontrolled state
+  const isOpen = controlledIsOpen ?? internalIsOpen;
+  const setIsOpen = onOpenChange ?? setInternalIsOpen;
+
   const [projectUrl, setProjectUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [isConnecting, setIsConnecting] = useState(false);
@@ -195,19 +208,19 @@ export function SupabaseConnectButton() {
     // Simulate the different stages of project creation
     return new Promise((resolve) => {
       // Start with BUILDING status
-      setCreationStatus('BUILDING');
+      setCreationStatus('🏗️ Building infrastructure (1/4)');
 
       // After 3 seconds, change to PROVISIONING
       setTimeout(() => {
-        setCreationStatus('PROVISIONING');
+        setCreationStatus('🔧 Provisioning database (2/4)');
 
         // After 3 more seconds, change to Setting up
         setTimeout(() => {
-          setCreationStatus('Setting up');
+          setCreationStatus('🚀 Starting services (3/4)');
 
           // After 3 more seconds, change to ACTIVE_HEALTHY
           setTimeout(() => {
-            setCreationStatus('ACTIVE_HEALTHY');
+            setCreationStatus('✅ Project active and healthy (4/4)');
             resolve();
           }, 3000);
         }, 3000);
@@ -370,32 +383,106 @@ export function SupabaseConnectButton() {
       // Save the config
       setSupabaseConfig(config);
 
-      // Close dialog and show success
-      setIsOpen(false);
-      setCreationStatus(null);
-      setProjectRef(null);
-      toast.dismiss('creating-project');
-      toast.success('New Supabase project created and connected!');
+      // Update database context for LLM
+      const contextInfo = await getDatabaseContextForLLM();
+
+      if (contextInfo) {
+        // Send the context to the LLM to make it aware of the database
+        try {
+          const llmResponse = await fetch('/api/llm-database', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              action: 'set_context',
+              context: contextInfo,
+            }),
+          });
+
+          if (llmResponse.ok) {
+            toast.info('Database context updated for LLM');
+
+            // Notify the user that the LLM can now help with database setup
+            toast.success('LLM is now aware of your Supabase database and can help you set it up');
+
+            // Trigger the LLM to suggest next steps for the user
+            try {
+              await fetch('/api/llmcall', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  message:
+                    'The Supabase project has been created successfully. Please suggest the next steps for database setup.',
+                  systemPrompt: 'supabase', // Use the supabase-specific prompt
+                }),
+              });
+            } catch (error) {
+              console.error('Error triggering LLM for database setup guidance:', error);
+            }
+          } else {
+            console.warn('Failed to update LLM context:', await llmResponse.json());
+          }
+        } catch (error) {
+          console.error('Error sending context to LLM:', error);
+        }
+      }
+
+      /*
+       * Keep the dialog open for a moment so the user can see the final status
+       * Don't reset the status immediately - it's needed for display
+       * Set a completion status message
+       */
+      setCreationStatus('✅ Project created successfully (4/4)');
+
+      // Wait 4 seconds before closing the dialog so users can see the final status
+      setTimeout(() => {
+        setIsOpen(false);
+        setCreationStatus(null);
+        setProjectRef(null);
+
+        // Show the success toast after the dialog closes
+        toast.dismiss('creating-project');
+        toast.success('New Supabase project created and connected!', {
+          autoClose: 5000,
+        });
+      }, 4000);
     } catch (error: unknown) {
       console.error('Failed to create project:', error);
       toast.dismiss('creating-project');
-      setCreationStatus(null);
-      setProjectRef(null);
+
+      // Show error in status for 5 seconds before closing
+      let errorMessage = 'Failed to create Supabase project';
 
       if (error instanceof Error) {
         // Provide more helpful error messages for common issues
         if (error.message.includes('No organizations found')) {
+          errorMessage = '❌ No Supabase organizations found';
           toast.error(
             'You need to create an organization in your Supabase dashboard first. Visit https://supabase.com/dashboard to create one.',
           );
         } else if (error.message.includes('404')) {
+          errorMessage = '❌ API endpoint not found';
           toast.error('API endpoint not found. Please ensure your application is properly configured.');
         } else {
+          errorMessage = `❌ Error: ${error.message}`;
           toast.error(error.message);
         }
       } else {
         toast.error('Failed to create Supabase project');
       }
+
+      // Update the status with the error message
+      setCreationStatus(errorMessage);
+
+      // Close dialog after a delay
+      setTimeout(() => {
+        setIsOpen(false);
+        setCreationStatus(null);
+        setProjectRef(null);
+      }, 5000);
     } finally {
       setIsConnecting(false);
     }
@@ -495,28 +582,28 @@ export function SupabaseConnectButton() {
 
           switch (currentStatus) {
             case 'BUILDING':
-              statusMessage = 'Building infrastructure (1/4)';
+              statusMessage = '🏗️ Building infrastructure (1/4)';
               break;
             case 'BUILDING_FAILED':
-              statusMessage = 'Building failed';
+              statusMessage = '❌ Building failed';
               break;
             case 'PROVISIONING':
-              statusMessage = 'Provisioning database (2/4)';
+              statusMessage = '🔧 Provisioning database (2/4)';
               break;
             case 'PROVISIONING_FAILED':
-              statusMessage = 'Provisioning failed';
+              statusMessage = '❌ Provisioning failed';
               break;
             case 'ACTIVE_HEALTHY':
-              statusMessage = 'Project active and healthy (4/4)';
+              statusMessage = '✅ Project active and healthy (4/4)';
               break;
             case 'COMING_UP':
-              statusMessage = 'Starting services (3/4)';
+              statusMessage = '🚀 Starting services (3/4)';
               break;
             case 'ERROR_PROVISIONING':
-              statusMessage = 'Error provisioning project';
+              statusMessage = '❌ Error provisioning project';
               break;
             default:
-              statusMessage = `Project status: ${currentStatus}`;
+              statusMessage = `⏳ Project status: ${currentStatus}`;
           }
 
           setCreationStatus(statusMessage);
@@ -644,117 +731,265 @@ export function SupabaseConnectButton() {
 
   return (
     <>
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant={config ? 'outline' : 'default'}
-              onClick={() => setIsOpen(true)}
-              className="supabase-connect-btn gap-2 bg-bolt-elements-bg-depth-1 border-bolt-elements-borderColor text-bolt-elements-textPrimary hover:bg-bolt-elements-bg-depth-2"
-            >
-              <div className="i-ph:database-duotone text-accent-500" />
+      {/* Only render the button if we're not being controlled */}
+      {controlledIsOpen === undefined && (
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant={config ? 'outline' : 'default'}
+                onClick={() => setIsOpen(true)}
+                size="default"
+                className={config ? 'border-green-500/30' : ''}
+              >
+                <div className={`i-ph:database-duotone ${config ? 'text-green-500' : ''}`} />
+                {config ? (
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                    <span>Connected</span>
+                  </div>
+                ) : (
+                  'Connect Supabase'
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
               {config ? (
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 bg-bolt-elements-icon-success rounded-full animate-pulse" />
-                  <span>Connected</span>
+                <div>
+                  <p className="text-bolt-elements-textPrimary">Connected to Supabase project:</p>
+                  <p className="text-sm text-bolt-elements-textSecondary">{getDisplayUrl(config.projectUrl)}</p>
                 </div>
               ) : (
-                'Connect Supabase'
+                <p className="text-bolt-elements-textPrimary">
+                  Connect to a Supabase project to enable database features.
+                </p>
               )}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>
-            {config ? (
-              <div>
-                <p>Connected to Supabase project:</p>
-                <p className="text-sm">{getDisplayUrl(config.projectUrl)}</p>
-              </div>
-            ) : (
-              <p>Connect to a Supabase project to enable database features.</p>
-            )}
-          </TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )}
 
-      <DialogRoot open={isOpen} onOpenChange={setIsOpen}>
-        <Dialog className="max-w-lg">
-          <DialogTitle>Connect to Supabase</DialogTitle>
-          <div className="flex flex-col gap-4">
-            <div className="flex flex-col gap-2">
-              <label className="text-sm">Project URL:</label>
-              <Input
-                type="text"
-                value={projectUrl}
-                onChange={(e) => setProjectUrl(e.target.value)}
-                placeholder="https://your-project.supabase.co"
-              />
-            </div>
-            <div className="flex flex-col gap-2">
-              <label className="text-sm">API Key:</label>
-              <Input
-                type="password"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder="Your Supabase API key"
-              />
-            </div>
-            <div className="flex flex-col gap-2">
-              <label className="text-sm">Project Name:</label>
-              <Input
-                type="text"
-                value={projectName}
-                onChange={(e) => setProjectName(e.target.value)}
-                placeholder="Your project name"
-              />
-            </div>
-            <div className="flex flex-col gap-2">
-              <label className="text-sm">Region:</label>
-              <select
-                value={selectedRegion}
-                onChange={(e) => setSelectedRegion(e.target.value)}
-                className="bg-bolt-elements-bg-depth-1 border-bolt-elements-borderColor text-bolt-elements-textPrimary p-2 rounded"
-              >
-                {isLoadingRegions ? (
-                  <option>Loading regions...</option>
-                ) : (
-                  availableRegions.map((region) => (
-                    <option key={region.id} value={region.id}>
-                      {region.name}
-                    </option>
-                  ))
-                )}
-              </select>
-            </div>
-            {projectRef && (
-              <div className="p-2 bg-bolt-elements-bg-depth-1 rounded border border-bolt-elements-borderColor">
-                <p className="text-sm">Project Reference: {projectRef}</p>
-              </div>
-            )}
-            <Button
-              onClick={handleCreateProject}
-              disabled={isConnecting}
-              className="bg-bolt-elements-bg-depth-1 border-bolt-elements-borderColor text-bolt-elements-textPrimary hover:bg-bolt-elements-bg-depth-2"
+      <Dialog.Root open={isOpen} onOpenChange={setIsOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[9999]" />
+          <div className="fixed inset-0 flex items-center justify-center z-[9999]">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              transition={{ duration: 0.2 }}
+              className="w-[90vw] md:w-[600px] max-h-[85vh] overflow-hidden"
             >
-              Create Project
-            </Button>
-            <Button
-              onClick={handleConnect}
-              disabled={isConnecting}
-              className="bg-bolt-elements-bg-depth-1 border-bolt-elements-borderColor text-bolt-elements-textPrimary hover:bg-bolt-elements-bg-depth-2"
-            >
-              Connect
-            </Button>
-            <Button
-              onClick={handleDisconnect}
-              disabled={isConnecting}
-              className="bg-bolt-elements-bg-depth-1 border-bolt-elements-borderColor text-bolt-elements-textPrimary hover:bg-bolt-elements-bg-depth-2"
-            >
-              Disconnect
-            </Button>
-            {creationStatus && <p className="text-sm text-bolt-elements-textSecondary">{creationStatus}</p>}
+              <Dialog.Content className="bg-white dark:bg-[#1E1E1E] rounded-lg border border-[#E5E5E5] dark:border-[#333333] shadow-xl">
+                <div className="p-4 border-b border-[#E5E5E5] dark:border-[#333333] flex items-center justify-between">
+                  <Dialog.Title className="text-lg font-semibold text-bolt-elements-textPrimary dark:text-bolt-elements-textPrimary-dark flex items-center gap-2">
+                    <motion.div
+                      initial={{ scale: 0.8 }}
+                      animate={{ scale: 1 }}
+                      transition={{ delay: 0.1 }}
+                      className="w-8 h-8 rounded-lg bg-bolt-elements-background-depth-3 flex items-center justify-center text-purple-500"
+                    >
+                      <div className="i-ph:database-duotone w-5 h-5" />
+                    </motion.div>
+                    Connect to Supabase
+                  </Dialog.Title>
+                  <Dialog.Close
+                    onClick={() => setIsOpen(false)}
+                    className={classNames(
+                      'p-2 rounded-lg transition-all duration-200 ease-in-out',
+                      'text-bolt-elements-textTertiary hover:text-bolt-elements-textPrimary',
+                      'dark:text-bolt-elements-textTertiary-dark dark:hover:text-bolt-elements-textPrimary-dark',
+                      'hover:bg-bolt-elements-background-depth-2 dark:hover:bg-bolt-elements-background-depth-3',
+                      'focus:outline-none focus:ring-2 focus:ring-bolt-elements-borderColor dark:focus:ring-bolt-elements-borderColor-dark',
+                    )}
+                  >
+                    <span className="i-ph:x block w-5 h-5" aria-hidden="true" />
+                    <span className="sr-only">Close dialog</span>
+                  </Dialog.Close>
+                </div>
+
+                <div className="p-6 space-y-6">
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-medium text-gray-600 dark:text-gray-400 flex items-center gap-1">
+                          <div className="i-ph:link-simple text-purple-500" />
+                          Project URL
+                        </label>
+                        <WithTooltip content="The URL of your Supabase project (e.g., https://example.supabase.co)">
+                          <div className="i-ph:question-bold text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400" />
+                        </WithTooltip>
+                      </div>
+                      <Input
+                        type="text"
+                        value={projectUrl}
+                        onChange={(e) => setProjectUrl(e.target.value)}
+                        placeholder="https://your-project.supabase.co"
+                        className="h-10 text-sm bg-[#F5F5F5] dark:bg-[#252525] border border-[#E5E5E5] dark:border-[#333333]"
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-medium text-gray-600 dark:text-gray-400 flex items-center gap-1">
+                          <div className="i-ph:key text-purple-500" />
+                          API Key
+                        </label>
+                        <WithTooltip content="Your Supabase project API key (found in Project Settings > API)">
+                          <div className="i-ph:question-bold text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400" />
+                        </WithTooltip>
+                      </div>
+                      <Input
+                        type="password"
+                        value={apiKey}
+                        onChange={(e) => setApiKey(e.target.value)}
+                        placeholder="Your Supabase API key"
+                        className="h-10 text-sm bg-[#F5F5F5] dark:bg-[#252525] border border-[#E5E5E5] dark:border-[#333333]"
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-medium text-gray-600 dark:text-gray-400 flex items-center gap-1">
+                          <div className="i-ph:tag text-purple-500" />
+                          Project Name
+                        </label>
+                        <WithTooltip content="A name to identify this Supabase connection in your application">
+                          <div className="i-ph:question-bold text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400" />
+                        </WithTooltip>
+                      </div>
+                      <Input
+                        type="text"
+                        value={projectName}
+                        onChange={(e) => setProjectName(e.target.value)}
+                        placeholder="Your project name"
+                        className="h-10 text-sm bg-[#F5F5F5] dark:bg-[#252525] border border-[#E5E5E5] dark:border-[#333333]"
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-medium text-gray-600 dark:text-gray-400 flex items-center gap-1">
+                          <div className="i-ph:globe text-purple-500" />
+                          Region
+                        </label>
+                        <WithTooltip content="The geographic region where your Supabase project is hosted">
+                          <div className="i-ph:question-bold text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400" />
+                        </WithTooltip>
+                      </div>
+                      <select
+                        value={selectedRegion}
+                        onChange={(e) => setSelectedRegion(e.target.value)}
+                        className="w-full h-10 px-3 py-2 rounded-lg bg-[#F5F5F5] dark:bg-[#252525] border border-[#E5E5E5] dark:border-[#333333] text-gray-900 dark:text-white text-sm appearance-none bg-no-repeat bg-right pr-8"
+                        style={{ backgroundImage: 'url("/icons/chevron-down.svg")' }}
+                      >
+                        {isLoadingRegions ? (
+                          <option>Loading regions...</option>
+                        ) : (
+                          availableRegions.map((region) => (
+                            <option key={region.id} value={region.id}>
+                              {region.name}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </div>
+                  </div>
+
+                  {projectRef && (
+                    <div className="p-3 bg-[#F5F5F5] dark:bg-[#252525] border border-[#E5E5E5] dark:border-[#333333] rounded-lg">
+                      <p className="text-sm text-gray-900 dark:text-white flex items-center gap-2">
+                        <div className="i-ph:info text-purple-500" />
+                        Project Reference: <span className="font-mono text-purple-500">{projectRef}</span>
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="border-t border-[#E5E5E5] dark:border-[#333333] pt-4 space-y-3">
+                    <motion.button
+                      onClick={handleCreateProject}
+                      disabled={isConnecting}
+                      className="w-full h-10 px-4 rounded-lg bg-purple-500 text-white hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed text-sm flex items-center justify-center gap-2"
+                      whileHover={!isConnecting ? { scale: 1.02 } : {}}
+                      whileTap={!isConnecting ? { scale: 0.98 } : {}}
+                    >
+                      {isConnecting ? (
+                        <>
+                          <div className="i-ph:spinner-gap animate-spin" />
+                          <span>Creating Project...</span>
+                        </>
+                      ) : (
+                        <>
+                          <div className="i-ph:plus-circle" />
+                          <span>Create Project</span>
+                        </>
+                      )}
+                    </motion.button>
+
+                    <motion.button
+                      onClick={handleConnect}
+                      disabled={isConnecting}
+                      className="w-full h-10 px-4 rounded-lg bg-[#F5F5F5] dark:bg-[#252525] text-gray-900 dark:text-white hover:bg-[#E5E5E5] dark:hover:bg-[#333333] disabled:opacity-50 disabled:cursor-not-allowed text-sm flex items-center justify-center gap-2"
+                      whileHover={!isConnecting ? { scale: 1.02 } : {}}
+                      whileTap={!isConnecting ? { scale: 0.98 } : {}}
+                    >
+                      {isConnecting ? (
+                        <>
+                          <div className="i-ph:spinner-gap animate-spin" />
+                          <span>Connecting...</span>
+                        </>
+                      ) : (
+                        <>
+                          <div className="i-ph:plug" />
+                          <span>Connect</span>
+                        </>
+                      )}
+                    </motion.button>
+
+                    <motion.button
+                      onClick={handleDisconnect}
+                      disabled={isConnecting}
+                      className="w-full h-10 px-4 rounded-lg border border-[#E5E5E5] dark:border-[#333333] text-red-500 hover:bg-red-500/10 disabled:opacity-50 disabled:cursor-not-allowed text-sm flex items-center justify-center gap-2"
+                      whileHover={!isConnecting ? { scale: 1.02 } : {}}
+                      whileTap={!isConnecting ? { scale: 0.98 } : {}}
+                    >
+                      <div className="i-ph:plug-x" />
+                      <span>Disconnect</span>
+                    </motion.button>
+                  </div>
+
+                  {creationStatus && (
+                    <div
+                      className={`text-sm p-4 rounded-lg border ${
+                        creationStatus.includes('❌')
+                          ? 'bg-red-500/10 border-red-500/30 text-red-700 dark:text-red-300'
+                          : 'bg-[#F5F5F5] dark:bg-[#252525] border-[#E5E5E5] dark:border-[#333333] text-gray-900 dark:text-white'
+                      }`}
+                    >
+                      <div className="flex items-center justify-center gap-2 mb-1">
+                        {isConnecting && !creationStatus.includes('❌') && (
+                          <div className="i-ph:spinner-gap text-purple-500 animate-spin" />
+                        )}
+                        {creationStatus.includes('❌') && <div className="i-ph:warning-circle text-red-500" />}
+                        <p className={`font-medium ${creationStatus.includes('❌') ? 'text-red-500' : ''}`}>
+                          {creationStatus}
+                        </p>
+                      </div>
+                      <p className="text-xs text-gray-500 dark:text-gray-400">
+                        {creationStatus.includes('❌')
+                          ? 'Error occurred. Dialog will close automatically.'
+                          : creationStatus.includes('ACTIVE_HEALTHY') || creationStatus.includes('(4/4)')
+                            ? 'Setup complete! Dialog will close automatically.'
+                            : 'Please wait while we setup your database...'}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </Dialog.Content>
+            </motion.div>
           </div>
-        </Dialog>
-      </DialogRoot>
+        </Dialog.Portal>
+      </Dialog.Root>
     </>
   );
 }
