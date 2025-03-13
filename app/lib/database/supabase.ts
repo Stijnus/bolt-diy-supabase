@@ -20,6 +20,11 @@ interface StoredConfig extends SupabaseConfig {
 // Core functions for config management
 export function getSupabaseConfig(): SupabaseConfig | null {
   try {
+    // Check if we're in a browser environment
+    if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+      return null;
+    }
+
     const encryptedConfig = localStorage.getItem(SUPABASE_CONFIG_KEY);
 
     if (!encryptedConfig) {
@@ -44,45 +49,69 @@ export function getSupabaseConfig(): SupabaseConfig | null {
     };
   } catch (error) {
     console.error('Error reading Supabase config:', error);
+
     return null;
   }
 }
 
 export function setSupabaseConfig(config: SupabaseConfig) {
   try {
-    const configToStore: StoredConfig = {
+    // Check if we're in a browser environment
+    if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+      console.warn('Cannot set Supabase config: localStorage not available');
+      return;
+    }
+
+    const storedConfig: StoredConfig = {
       ...config,
       version: CONFIG_VERSION,
       timestamp: Date.now(),
     };
 
-    const encryptedConfig = encrypt(JSON.stringify(configToStore));
+    const configString = JSON.stringify(storedConfig);
+    const encryptedConfig = encrypt(configString);
+
     localStorage.setItem(SUPABASE_CONFIG_KEY, encryptedConfig);
   } catch (error) {
     console.error('Error saving Supabase config:', error);
-    throw new Error('Failed to save Supabase configuration securely');
   }
 }
 
 export function clearSupabaseConfig() {
-  localStorage.removeItem(SUPABASE_CONFIG_KEY);
+  try {
+    // Check if we're in a browser environment
+    if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+      return;
+    }
+
+    localStorage.removeItem(SUPABASE_CONFIG_KEY);
+  } catch (error) {
+    console.error('Error clearing Supabase config:', error);
+  }
 }
 
-// Create Supabase client with stored config
-export function createSupabaseClient() {
-  const config = getSupabaseConfig();
+let supabaseClient: SupabaseClient | null = null;
 
-  if (!config) {
-    throw new Error('Supabase configuration not found');
+export const createSupabaseClient = () => {
+  if (supabaseClient) {
+    return supabaseClient;
   }
 
-  return createClient(config.projectUrl, config.apiKey, {
+  const config = getSupabaseConfig();
+  if (!config) {
+    throw new Error('No Supabase configuration found');
+  }
+
+  supabaseClient = createClient(config.projectUrl, config.apiKey, {
     auth: {
-      persistSession: true,
-      autoRefreshToken: true,
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
     },
   });
-}
+
+  return supabaseClient;
+};
 
 // Verify Supabase connection
 export async function verifySupabaseConnection(config: SupabaseConfig): Promise<boolean> {
@@ -122,6 +151,7 @@ export async function verifySupabaseConnection(config: SupabaseConfig): Promise<
       }
 
       console.error('All connection tests failed');
+
       return false;
     } catch (error) {
       console.error('Failed to verify Supabase connection:', error);

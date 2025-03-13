@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { Button } from '~/components/ui/Button';
 import { Input } from '~/components/ui/Input';
 import { getManagementKey, setManagementKey, clearManagementKey } from '~/lib/database/management';
+import { getSupabaseConfig } from '~/lib/database/supabase';
 import { useSearchParams } from '@remix-run/react';
 import { toast } from 'react-toastify';
 
@@ -124,6 +125,7 @@ export default function ManagementKeyTab({ onConnectionUpdate }: ManagementKeyTa
   useEffect(() => {
     // Load stored credentials on mount
     const storedCredentials = getStoredOAuthCredentials();
+    const existingConfig = getSupabaseConfig();
 
     if (storedCredentials) {
       setOAuthCredentials(storedCredentials);
@@ -140,6 +142,18 @@ export default function ManagementKeyTab({ onConnectionUpdate }: ManagementKeyTa
     const oauthStatus = searchParams.get('oauth');
 
     const handleConnectionSuccess = async () => {
+      // If we already have a Supabase connection, just clean up the URL
+      if (existingConfig) {
+        if (supabaseStatus) {
+          searchParams.delete('supabase');
+        }
+        if (oauthStatus) {
+          searchParams.delete('oauth');
+        }
+        setSearchParams(searchParams);
+        return;
+      }
+
       // Show connecting message
       toast.info('Establishing connection to Supabase...');
 
@@ -316,6 +330,13 @@ export default function ManagementKeyTab({ onConnectionUpdate }: ManagementKeyTa
 
   const handleOAuthLogin = async () => {
     try {
+      // Check if we already have a Supabase connection
+      const existingConfig = getSupabaseConfig();
+      if (existingConfig) {
+        toast.info('Already connected to Supabase');
+        return;
+      }
+
       toast.info('Initiating Supabase OAuth login...');
 
       // Check if we have stored credentials
@@ -437,16 +458,32 @@ export default function ManagementKeyTab({ onConnectionUpdate }: ManagementKeyTa
                 </div>
               ) : (
                 <div className="flex flex-col items-center gap-4">
-                  <Button onClick={() => setIsEditing(true)}>Add Management Key Manually</Button>
-                  <div className="flex items-center gap-2">
-                    <div className="h-px bg-bolt-elements-borderColor flex-1" />
-                    <span className="text-sm text-bolt-elements-textSecondary">or</span>
-                    <div className="h-px bg-bolt-elements-borderColor flex-1" />
-                  </div>
-                  <Button variant="outline" onClick={handleOAuthLogin} className="w-full">
-                    <div className="i-ph:sign-in mr-2" />
-                    Connect with Supabase
-                  </Button>
+                  {getSupabaseConfig() ? (
+                    <div className="w-full p-4 bg-green-500/10 rounded-lg border border-green-500/30">
+                      <div className="flex items-center gap-2 mb-2">
+                        <div className="i-ph:check-circle text-green-500" />
+                        <span className="text-sm font-medium text-bolt-elements-textPrimary">
+                          Already Connected to Supabase
+                        </span>
+                      </div>
+                      <p className="text-xs text-bolt-elements-textSecondary ml-6">
+                        Management key is optional. You only need it if you want to create new projects automatically.
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <Button onClick={() => setIsEditing(true)}>Add Management Key Manually</Button>
+                      <div className="flex items-center gap-2">
+                        <div className="h-px bg-bolt-elements-borderColor flex-1" />
+                        <span className="text-sm text-bolt-elements-textSecondary">or</span>
+                        <div className="h-px bg-bolt-elements-borderColor flex-1" />
+                      </div>
+                      <Button variant="outline" onClick={handleOAuthLogin} className="w-full">
+                        <div className="i-ph:sign-in mr-2" />
+                        Connect with Supabase
+                      </Button>
+                    </>
+                  )}
                 </div>
               )}
 

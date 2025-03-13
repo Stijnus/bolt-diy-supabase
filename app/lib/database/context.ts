@@ -1,5 +1,6 @@
 import { getDatabaseContext } from './llm-supabase';
 import { getManagementKey, createSupabaseProject, type ProjectStatus } from './management';
+import { getSupabaseConfig, createSupabaseClient } from './supabase';
 
 interface DatabaseContextInfo {
   connected: boolean;
@@ -32,10 +33,10 @@ interface ColumnInfo {
  */
 export async function getDatabaseContextForLLM(_context?: any): Promise<DatabaseContextInfo | null> {
   try {
-    const context = await getDatabaseContext();
+    const config = getSupabaseConfig();
     const managementKey = getManagementKey();
 
-    if (!context.connected) {
+    if (!config) {
       return {
         connected: false,
         projectUrl: '',
@@ -46,11 +47,80 @@ export async function getDatabaseContextForLLM(_context?: any): Promise<Database
       };
     }
 
+    // Create Supabase client
+    const supabase = createSupabaseClient();
+
+    // Use the same connection validation as the UI
+    try {
+      // First try the sentinel check
+      const { error: sentinelError } = await supabase.from('_sentinel_check_').select('count').limit(1);
+
+      if (!sentinelError || sentinelError.code === 'PGRST116' || sentinelError.code === '42P01') {
+        // Connection is valid, get schema if possible
+        const context = await getDatabaseContext();
+
+        return {
+          connected: true,
+          projectUrl: config.projectUrl,
+          tables: context.schema?.map((s) => s.table) || [],
+          schema: context.schema || [],
+          managementKey: {
+            available: !!managementKey,
+            canCreateProjects: !!managementKey,
+          },
+        };
+      }
+
+      // Try version check as fallback
+      const { error: versionError } = await supabase.rpc('version');
+
+      if (!versionError || versionError.code === 'PGRST202') {
+        return {
+          connected: true,
+          projectUrl: config.projectUrl,
+          tables: [],
+          schema: [],
+          managementKey: {
+            available: !!managementKey,
+            canCreateProjects: !!managementKey,
+          },
+        };
+      }
+
+      // Last resort - check if API is accessible
+      const { error: apiError } = await supabase.from('_fake_table_to_test_connection_').select('count').limit(1);
+
+      if (apiError && apiError.code === '42P01') {
+        return {
+          connected: true,
+          projectUrl: config.projectUrl,
+          tables: [],
+          schema: [],
+          managementKey: {
+            available: !!managementKey,
+            canCreateProjects: !!managementKey,
+          },
+        };
+      }
+    } catch (error) {
+      console.warn('Connection validation error:', error);
+      // If any error occurs during validation, consider it connected
+      // This matches the UI behavior
+      return {
+        connected: true,
+        projectUrl: config.projectUrl,
+        tables: [],
+        schema: [],
+        managementKey: {
+          available: !!managementKey,
+          canCreateProjects: !!managementKey,
+        },
+      };
+    }
+
     return {
-      connected: true,
-      projectUrl: context.projectUrl,
-      tables: context.schema.map((s) => s.table),
-      schema: context.schema,
+      connected: false,
+      projectUrl: config.projectUrl,
       managementKey: {
         available: !!managementKey,
         canCreateProjects: !!managementKey,

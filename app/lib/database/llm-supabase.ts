@@ -285,9 +285,195 @@ export async function getDatabaseSchema(): Promise<SchemaInfo[]> {
   }
 }
 
-// Get database context for LLM
+interface ValidatedDatabaseContext extends DatabaseContext {
+  lastValidated: number;
+  isAccessible: boolean;
+  features: {
+    canQuery: boolean;
+    canModify: boolean;
+    hasSchema: boolean;
+  };
+}
+
+// Update storage to use validated context
+let storedDatabaseContext: ValidatedDatabaseContext | null = null;
+
+/**
+ * Validates database access by performing test operations
+ */
+async function validateDatabaseAccess(): Promise<{
+  isAccessible: boolean;
+  features: ValidatedDatabaseContext['features'];
+  error?: string;
+}> {
+  try {
+    const supabase = SupabaseManager.getInstance().getClient();
+    const features = {
+      canQuery: false,
+      canModify: false,
+      hasSchema: false,
+    };
+
+    // Test 1: Basic API connectivity check
+    try {
+      const { error: healthError } = await supabase.from('_health_check').select('count').limit(1);
+      // 404 is expected for non-existent table, but other errors indicate issues
+      features.canQuery = !healthError || healthError.code === '42P01' || healthError.code === 'PGRST116';
+    } catch (error) {
+      console.warn('Health check failed:', error);
+    }
+
+    // Test 2: Schema access check using multiple methods
+    try {
+      // Method 1: Try information_schema
+      const { data: tables, error: schemaError } = await supabase
+        .from('information_schema.tables')
+        .select('table_name')
+        .eq('table_schema', 'public')
+        .eq('table_type', 'BASE TABLE');
+
+      if (!schemaError && tables) {
+        features.hasSchema = true;
+      } else {
+        // Method 2: Try RPC
+        const { error: rpcError } = await supabase.rpc('get_schema_info');
+        features.hasSchema = !rpcError;
+      }
+    } catch (error) {
+      console.warn('Schema access check failed:', error);
+    }
+
+    // Test 3: Write permission check
+    if (features.canQuery) {
+      try {
+        // Create a temporary test table
+        const { error: createError } = await supabase.rpc('execute_sql', {
+          sql_query: `
+            CREATE TABLE IF NOT EXISTS _ai_test_table (
+              id SERIAL PRIMARY KEY,
+              test_timestamp TIMESTAMPTZ DEFAULT NOW()
+            );
+          `,
+        });
+
+        if (!createError) {
+          features.canModify = true;
+
+          // Clean up the test table
+          await supabase.rpc('execute_sql', {
+            sql_query: 'DROP TABLE IF EXISTS _ai_test_table;',
+          });
+        }
+      } catch (error) {
+        console.warn('Write permission check failed:', error);
+      }
+    }
+
+    // Consider the database accessible if we can do at least one operation
+    const isAccessible = features.canQuery || features.canModify || features.hasSchema;
+
+    if (!isAccessible) {
+      return {
+        isAccessible: false,
+        features,
+        error: 'Could not perform any database operations',
+      };
+    }
+
+    return {
+      isAccessible: true,
+      features,
+    };
+  } catch (error) {
+    console.error('Database validation failed:', error);
+    return {
+      isAccessible: false,
+      features: {
+        canQuery: false,
+        canModify: false,
+        hasSchema: false,
+      },
+      error: error instanceof Error ? error.message : 'Unknown validation error',
+    };
+  }
+}
+
+/**
+ * Sets the database context for LLM interactions with validation
+ * @param context The database context to store
+ */
+export async function setDatabaseContext(context: DatabaseContext): Promise<void> {
+  try {
+    // Validate database access
+    const { isAccessible, features, error } = await validateDatabaseAccess();
+
+    if (!isAccessible) {
+      throw new Error(`Database validation failed: ${error || 'Could not verify database access'}`);
+    }
+
+    // Store validated context
+    storedDatabaseContext = {
+      ...context,
+      lastValidated: Date.now(),
+      isAccessible,
+      features,
+    };
+
+    console.log('Database context validated and stored:', {
+      projectUrl: context.projectUrl,
+      isAccessible,
+      features,
+    });
+  } catch (error) {
+    console.error('Failed to set database context:', error);
+    throw error;
+  }
+}
+
+/**
+ * Gets the stored database context with validation
+ * @param forceValidate Force revalidation of the connection
+ * @returns The stored database context or null if not set
+ */
+export async function getStoredDatabaseContext(forceValidate = false): Promise<ValidatedDatabaseContext | null> {
+  if (!storedDatabaseContext) {
+    return null;
+  }
+
+  // Revalidate if forced or if last validation was more than 5 minutes ago
+  const shouldValidate = forceValidate || Date.now() - storedDatabaseContext.lastValidated > 5 * 60 * 1000;
+
+  if (shouldValidate) {
+    try {
+      const { isAccessible, features } = await validateDatabaseAccess();
+
+      storedDatabaseContext = {
+        ...storedDatabaseContext,
+        lastValidated: Date.now(),
+        isAccessible,
+        features,
+      };
+    } catch (error) {
+      console.warn('Context revalidation failed:', error);
+    }
+  }
+
+  return storedDatabaseContext;
+}
+
+// Update getDatabaseContext to use validated context
 export async function getDatabaseContext(): Promise<DatabaseContext> {
   try {
+    // Check stored context first
+    const validatedContext = await getStoredDatabaseContext();
+    if (validatedContext?.isAccessible) {
+      return {
+        connected: true,
+        projectUrl: validatedContext.projectUrl,
+        schema: validatedContext.schema,
+      };
+    }
+
     const config = getSupabaseConfig();
 
     if (!config) {
@@ -301,11 +487,31 @@ export async function getDatabaseContext(): Promise<DatabaseContext> {
 
     const schema = await getDatabaseSchema();
 
-    return {
+    // Validate new connection
+    const { isAccessible, features, error } = await validateDatabaseAccess();
+
+    if (!isAccessible) {
+      return {
+        connected: false,
+        projectUrl: config.projectUrl,
+        schema: [],
+        error: error || 'Database validation failed',
+      };
+    }
+
+    const context = {
       connected: true,
       projectUrl: config.projectUrl,
       schema,
+      lastValidated: Date.now(),
+      isAccessible,
+      features,
     };
+
+    // Store the validated context
+    storedDatabaseContext = context;
+
+    return context;
   } catch (error) {
     console.error('Failed to get database context:', error);
     return {

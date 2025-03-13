@@ -10,7 +10,7 @@ import {
   clearSupabaseConfig,
 } from '~/lib/database/supabase';
 import { getManagementKey, getAvailableRegions, type ProjectStatus } from '~/lib/database/management';
-import { setupInitialStructure } from '~/lib/database/setup';
+import { setupInitialStructure, setupDatabase } from '~/lib/database/setup';
 import WithTooltip, { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from '~/components/ui/Tooltip';
 import { getDatabaseContextForLLM } from '~/lib/database/context';
 import { motion } from 'framer-motion';
@@ -387,6 +387,15 @@ export function SupabaseConnectButton({ isOpen: controlledIsOpen, onOpenChange }
       const contextInfo = await getDatabaseContextForLLM();
 
       if (contextInfo) {
+        // Set up the database
+        try {
+          await setupDatabase();
+          toast.success('Database setup completed');
+        } catch (error) {
+          console.error('Error setting up database:', error);
+          toast.error('Failed to setup database');
+        }
+
         // Send the context to the LLM to make it aware of the database
         try {
           const llmResponse = await fetch('/api/llm-database', {
@@ -740,13 +749,13 @@ export function SupabaseConnectButton({ isOpen: controlledIsOpen, onOpenChange }
                 variant={config ? 'outline' : 'default'}
                 onClick={() => setIsOpen(true)}
                 size="default"
-                className={config ? 'border-green-500/30' : ''}
+                className={config ? 'border-green-500/30 hover:bg-green-500/10' : ''}
               >
-                <div className={`i-ph:database-duotone ${config ? 'text-green-500' : ''}`} />
+                <div className={`i-ph:database-duotone ${config ? 'text-green-500' : ''} mr-1.5`} />
                 {config ? (
                   <div className="flex items-center gap-2">
                     <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-                    <span>Connected</span>
+                    <span className="text-green-600">Connected</span>
                   </div>
                 ) : (
                   'Connect Supabase'
@@ -755,14 +764,29 @@ export function SupabaseConnectButton({ isOpen: controlledIsOpen, onOpenChange }
             </TooltipTrigger>
             <TooltipContent>
               {config ? (
-                <div>
-                  <p className="text-bolt-elements-textPrimary">Connected to Supabase project:</p>
-                  <p className="text-sm text-bolt-elements-textSecondary">{getDisplayUrl(config.projectUrl)}</p>
+                <div className="space-y-2 p-1">
+                  <p className="text-bolt-elements-textPrimary font-medium">Connected to Supabase project:</p>
+                  <div className="flex items-center gap-2 text-xs">
+                    <div className="i-ph:database text-accent-500" />
+                    <span className="text-bolt-elements-textSecondary">{getDisplayUrl(config.projectUrl)}</span>
+                  </div>
+                  <div className="flex items-center gap-2 text-xs">
+                    <div className="i-ph:check-circle text-green-500" />
+                    <span className="text-bolt-elements-textSecondary">Connection active</span>
+                  </div>
                 </div>
               ) : (
-                <p className="text-bolt-elements-textPrimary">
-                  Connect to a Supabase project to enable database features.
-                </p>
+                <div className="space-y-1 p-1">
+                  <p className="text-bolt-elements-textPrimary">
+                    Connect to a Supabase project to enable database features.
+                  </p>
+                  <div className="flex items-center gap-2 text-xs">
+                    <div className="i-ph:info-duotone text-accent-500/80" />
+                    <span className="text-bolt-elements-textSecondary">
+                      Adds database-powered capabilities to your AI assistant
+                    </span>
+                  </div>
+                </div>
               )}
             </TooltipContent>
           </Tooltip>
@@ -810,6 +834,55 @@ export function SupabaseConnectButton({ isOpen: controlledIsOpen, onOpenChange }
 
                 <div className="p-6 space-y-6">
                   <div className="space-y-4">
+                    {config && (
+                      <div className="p-4 bg-green-500/10 border border-green-500/30 rounded-lg mb-4">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <div className="i-ph:check-circle text-green-500" />
+                            <h3 className="text-sm font-medium text-bolt-elements-textPrimary">Already Connected</h3>
+                          </div>
+                          <Button
+                            variant="outline"
+                            size="xs"
+                            onClick={async () => {
+                              try {
+                                const isValid = await verifySupabaseConnection(config);
+
+                                if (isValid) {
+                                  toast.success('Connection test successful');
+                                } else {
+                                  toast.error('Connection test failed');
+                                }
+                              } catch (error) {
+                                console.error('Connection test error:', error);
+                                toast.error('Connection test failed');
+                              }
+                            }}
+                            className="text-xs border-green-500/30 text-green-500 hover:bg-green-500/10 flex items-center gap-1"
+                          >
+                            <div className="i-ph:activity" />
+                            Test Connection
+                          </Button>
+                        </div>
+                        <div className="pl-6 space-y-1">
+                          <div className="flex items-center gap-2 text-xs">
+                            <div className="i-ph:database text-accent-500/70" />
+                            <span className="text-bolt-elements-textSecondary">Project URL:</span>
+                            <span className="text-bolt-elements-textPrimary font-mono">{config.projectUrl}</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-xs">
+                            <div className="i-ph:key text-accent-500/70" />
+                            <span className="text-bolt-elements-textSecondary">API Key:</span>
+                            <span className="text-bolt-elements-textPrimary font-mono">
+                              {config.apiKey
+                                ? `${config.apiKey.substring(0, 3)}...${config.apiKey.substring(config.apiKey.length - 3)}`
+                                : 'Not set'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
                         <label className="text-sm font-medium text-gray-600 dark:text-gray-400 flex items-center gap-1">
@@ -877,22 +950,26 @@ export function SupabaseConnectButton({ isOpen: controlledIsOpen, onOpenChange }
                           <div className="i-ph:question-bold text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400" />
                         </WithTooltip>
                       </div>
-                      <select
-                        value={selectedRegion}
-                        onChange={(e) => setSelectedRegion(e.target.value)}
-                        className="w-full h-10 px-3 py-2 rounded-lg bg-[#F5F5F5] dark:bg-[#252525] border border-[#E5E5E5] dark:border-[#333333] text-gray-900 dark:text-white text-sm appearance-none bg-no-repeat bg-right pr-8"
-                        style={{ backgroundImage: 'url("/icons/chevron-down.svg")' }}
-                      >
-                        {isLoadingRegions ? (
-                          <option>Loading regions...</option>
-                        ) : (
-                          availableRegions.map((region) => (
-                            <option key={region.id} value={region.id}>
-                              {region.name}
-                            </option>
-                          ))
-                        )}
-                      </select>
+                      <div className="relative">
+                        <select
+                          value={selectedRegion}
+                          onChange={(e) => setSelectedRegion(e.target.value)}
+                          className="w-full h-10 px-3 py-2 rounded-lg bg-[#F5F5F5] dark:bg-[#252525] border border-[#E5E5E5] dark:border-[#333333] text-gray-900 dark:text-white text-sm appearance-none"
+                        >
+                          {isLoadingRegions ? (
+                            <option>Loading regions...</option>
+                          ) : (
+                            availableRegions.map((region) => (
+                              <option key={region.id} value={region.id}>
+                                {region.name}
+                              </option>
+                            ))
+                          )}
+                        </select>
+                        <div className="absolute right-3 top-3 pointer-events-none">
+                          <div className="i-ph:caret-down text-gray-500" />
+                        </div>
+                      </div>
                     </div>
                   </div>
 

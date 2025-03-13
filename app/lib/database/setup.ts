@@ -110,10 +110,11 @@ export async function setupInitialStructure(config: SupabaseConfig): Promise<voi
     try {
       // Check if the exec function exists (needed for executing raw SQL)
       const { error: execCheckError } = await supabase.rpc('exec', { query: 'SELECT 1' });
-      
+
       if (execCheckError) {
         // If 'exec' function doesn't exist, create it first
         console.log('Creating exec function for SQL execution...');
+
         const createExecFunctionSql = `
           CREATE OR REPLACE FUNCTION exec(query text)
           RETURNS void AS $$
@@ -122,57 +123,46 @@ export async function setupInitialStructure(config: SupabaseConfig): Promise<voi
           END;
           $$ LANGUAGE plpgsql SECURITY DEFINER;
         `;
-        
+
         // We need to use direct SQL API as the exec function doesn't exist yet
-        const { error: createExecError } = await supabase
-          .from('_sentinel_exec_check_')
-          .select('*')
-          .limit(1)
-          .then(() => ({ error: null }))
-          .catch(async () => {
-            // Try direct SQL execution through REST API
-            try {
-              const response = await fetch(`${config.projectUrl}/rest/v1/sql`, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'apikey': config.apiKey,
-                  'Authorization': `Bearer ${config.apiKey}`
-                },
-                body: JSON.stringify({ query: createExecFunctionSql })
-              });
-              
-              if (!response.ok) {
-                console.warn('Failed to create exec function via REST API:', await response.text());
-                return { error: new Error('Failed to create exec function') };
-              }
-              
-              return { error: null };
-            } catch (err) {
-              console.error('Error creating exec function:', err);
-              return { error: err as Error };
-            }
+        try {
+          const response = await fetch(`${config.projectUrl}/rest/v1/sql`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              apikey: config.apiKey,
+              Authorization: `Bearer ${config.apiKey}`,
+            },
+            body: JSON.stringify({ query: createExecFunctionSql }),
           });
-          
-        if (createExecError) {
-          console.warn('Could not create exec function, will try alternative approach');
+
+          if (!response.ok) {
+            console.warn('Failed to create exec function via REST API:', await response.text());
+            return;
+          }
+        } catch (err) {
+          console.error('Error creating exec function:', err);
+          return;
         }
       }
 
       // Now try to create the schema info function
       console.log('Creating schema and table info functions...');
-      
+
       const schemaResult = await supabase.rpc('exec', { query: SCHEMA_INFO_FUNCTION });
+
       if (schemaResult.error) {
         console.warn('Failed to create schema_info function:', schemaResult.error);
       }
-      
+
       const tableResult = await supabase.rpc('exec', { query: TABLE_INFO_FUNCTION });
+
       if (tableResult.error) {
         console.warn('Failed to create table_info function:', tableResult.error);
-        
+
         // Try alternative approach with separate queries
         console.log('Trying alternative approach for table_info function...');
+
         const tableInfoAlt = `
           CREATE OR REPLACE FUNCTION get_table_info()
           RETURNS TABLE (name TEXT, size BIGINT, row_count BIGINT) 
@@ -188,8 +178,9 @@ export async function setupInitialStructure(config: SupabaseConfig): Promise<voi
           END;
           $$ LANGUAGE plpgsql SECURITY DEFINER;
         `;
-        
+
         const altResult = await supabase.rpc('exec', { query: tableInfoAlt });
+
         if (altResult.error) {
           console.warn('Alternative approach also failed:', altResult.error);
         } else {
@@ -200,13 +191,102 @@ export async function setupInitialStructure(config: SupabaseConfig): Promise<voi
       console.log('Database functions setup completed');
     } catch (funcError) {
       console.error('Error setting up database functions:', funcError);
-      console.log('Project will continue without stats until functions are created')
+      console.log('Project will continue without stats until functions are created');
     }
+
     return;
   } catch (error) {
     console.error('Failed to set up initial database structure:', error);
 
     // Don't throw an error, just log it - we want to continue even if setup fails
     console.log('Continuing with connection despite setup issues');
+  }
+}
+
+export async function setupDatabase() {
+  try {
+    const client = createSupabaseClient();
+
+    // Define the SQL setup directly in the code instead of reading from a file
+    const setupSQL = `
+      -- Create auth schema if it doesn't exist
+      CREATE SCHEMA IF NOT EXISTS auth;
+
+      -- Create users table in auth schema
+      CREATE TABLE IF NOT EXISTS auth.users (
+          id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+          email TEXT UNIQUE NOT NULL,
+          encrypted_password TEXT NOT NULL,
+          email_confirmed_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+          updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
+      );
+
+      -- Create function to get database size
+      CREATE OR REPLACE FUNCTION get_database_size()
+      RETURNS TABLE (
+          total_size BIGINT,
+          table_size BIGINT,
+          index_size BIGINT
+      ) LANGUAGE plpgsql SECURITY DEFINER AS $$
+      BEGIN
+          RETURN QUERY
+          SELECT
+              pg_database_size(current_database()) as total_size,
+              COALESCE(SUM(pg_total_relation_size(quote_ident(table_name))), 0) as table_size,
+              COALESCE(SUM(pg_indexes_size(quote_ident(table_name))), 0) as index_size
+          FROM information_schema.tables
+          WHERE table_schema = 'public';
+      END;
+      $$;
+
+      -- Create function to update updated_at timestamp
+      CREATE OR REPLACE FUNCTION update_updated_at_column()
+      RETURNS TRIGGER AS $$
+      BEGIN
+          NEW.updated_at = now();
+          RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+
+      -- Create trigger for updating updated_at
+      CREATE TRIGGER update_users_updated_at
+          BEFORE UPDATE ON auth.users
+          FOR EACH ROW
+          EXECUTE FUNCTION update_updated_at_column();
+
+      -- Enable Row Level Security
+      ALTER TABLE auth.users ENABLE ROW LEVEL SECURITY;
+
+      -- Create policy for users to view their own data
+      CREATE POLICY "Users can view own data" ON auth.users
+          FOR SELECT USING (auth.uid() = id);
+
+      -- Create policy for users to update their own data
+      CREATE POLICY "Users can update own data" ON auth.users
+          FOR UPDATE USING (auth.uid() = id);
+
+      -- Grant necessary permissions
+      GRANT USAGE ON SCHEMA auth TO postgres, anon, authenticated;
+      GRANT ALL ON ALL TABLES IN SCHEMA auth TO postgres;
+      GRANT SELECT ON auth.users TO anon, authenticated;
+      GRANT UPDATE ON auth.users TO authenticated;
+      GRANT EXECUTE ON FUNCTION get_database_size() TO postgres, anon, authenticated;
+    `;
+
+    // Execute the SQL
+    const { error } = await client.rpc('exec', { query: setupSQL });
+
+    if (error) {
+      console.error('Error setting up database:', error);
+      throw error;
+    }
+
+    console.log('Database setup completed successfully');
+
+    return true;
+  } catch (error) {
+    console.error('Failed to setup database:', error);
+    return false;
   }
 }

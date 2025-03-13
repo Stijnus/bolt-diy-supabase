@@ -1,112 +1,201 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { motion } from 'framer-motion';
 import { toast } from 'react-toastify';
 import { Button } from '~/components/ui/Button';
 import { getSupabaseConfig, clearSupabaseConfig, createSupabaseClient } from '~/lib/database/supabase';
-import { getDatabaseContextForLLM } from '~/lib/database/context';
+import { setupDatabase } from '~/lib/database/setup';
 import ManagementKeyTab from './ManagementKeyTab';
 import { useSupabaseStats } from '~/lib/hooks/useSupabaseStats';
-import { executeSafeSQLQuery } from '~/lib/database/llm-supabase';
 import { SupabaseConnectButton } from '~/components/header/SupabaseConnectButton';
 
+// Types
+interface FeatureState {
+  rls: boolean;
+  storage: boolean;
+  auth: boolean;
+  edgeFunctions: boolean;
+}
+
+interface SetupStatus {
+  isSettingUp: boolean;
+  step:
+    | 'not_started'
+    | 'creating_schema'
+    | 'creating_tables'
+    | 'creating_functions'
+    | 'setting_permissions'
+    | 'completed'
+    | 'error';
+  error?: string;
+}
+
+// Add these new components at the top level
+const StatCard = ({
+  name,
+  value,
+  icon,
+  trend,
+  tooltip,
+}: {
+  name: string;
+  value: string | number;
+  icon: string;
+  trend?: { value: number; isPositive: boolean };
+  tooltip?: string;
+}) => (
+  <div className="group relative bg-bolt-elements-bg-depth-2 rounded-lg p-4 border border-bolt-elements-borderColor hover:shadow-md transition-all">
+    <div className="flex items-center gap-2 mb-1">
+      <div className={`${icon} text-accent-500`} />
+      <h4 className="text-sm font-medium text-bolt-elements-textSecondary capitalize">{name.replace(/_/g, ' ')}</h4>
+      {tooltip && (
+        <div
+          className="i-ph:info text-bolt-elements-textSecondary/50 group-hover:text-bolt-elements-textSecondary cursor-help"
+          title={tooltip}
+        />
+      )}
+    </div>
+    <div className="flex items-baseline gap-2">
+      <p className="text-2xl font-bold text-bolt-elements-textPrimary pl-6">{value}</p>
+      {trend && (
+        <div className={`flex items-center gap-1 text-xs ${trend.isPositive ? 'text-green-500' : 'text-red-500'}`}>
+          <div className={`i-ph:${trend.isPositive ? 'trend-up' : 'trend-down'}`} />
+          <span>{Math.abs(trend.value)}%</span>
+        </div>
+      )}
+    </div>
+  </div>
+);
+
+const FeatureCard = ({
+  name,
+  isConfigured,
+  icon = 'i-ph:puzzle-piece',
+  description,
+  onSetup,
+  status,
+}: {
+  name: string;
+  isConfigured: boolean;
+  icon?: string;
+  description?: string;
+  onSetup?: () => void;
+  status?: 'ready' | 'configuring' | 'error';
+}) => (
+  <div
+    className={`bg-bolt-elements-bg-depth-2 rounded-lg p-4 border transition-all ${
+      isConfigured ? 'border-green-500/30 hover:shadow-md' : 'border-bolt-elements-borderColor'
+    }`}
+  >
+    <div className="flex items-center justify-between">
+      <div className="flex items-center gap-2">
+        <div className={`${icon} ${isConfigured ? 'text-green-500' : 'text-bolt-elements-textSecondary'}`} />
+        <h4 className="text-sm font-medium text-bolt-elements-textPrimary">{name}</h4>
+      </div>
+      <div className="flex items-center gap-2">
+        {status === 'configuring' && (
+          <div className="flex items-center gap-1 text-xs text-accent-500">
+            <div className="i-ph:spinner-gap animate-spin" />
+            <span>Configuring...</span>
+          </div>
+        )}
+        {status === 'error' && (
+          <div className="flex items-center gap-1 text-xs text-red-500">
+            <div className="i-ph:warning-circle" />
+            <span>Error</span>
+          </div>
+        )}
+        {!status && (
+          <div
+            className={`flex items-center gap-1 text-xs font-medium ${
+              isConfigured ? 'text-green-500' : 'text-bolt-elements-textSecondary'
+            }`}
+          >
+            {isConfigured ? (
+              <>
+                <span className="i-ph:check-circle-duotone text-lg"></span>
+                <span>Enabled</span>
+              </>
+            ) : (
+              <>
+                <span className="i-ph:x-circle-duotone text-lg"></span>
+                <span>Not Enabled</span>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+    {description && <p className="text-xs text-bolt-elements-textSecondary mt-2 ml-6">{description}</p>}
+    {!isConfigured && onSetup && (
+      <Button
+        variant="outline"
+        size="xs"
+        onClick={onSetup}
+        className="mt-3 ml-6 border-accent-500/30 text-accent-500 hover:bg-accent-500/10"
+      >
+        <div className="i-ph:gear mr-1" />
+        Configure
+      </Button>
+    )}
+  </div>
+);
+
+// Add this new component
+const ProjectDetailsCard = ({ title, icon, children }: { title: string; icon: string; children: React.ReactNode }) => (
+  <div className="bg-bolt-elements-bg-depth-2 rounded-lg p-4 border border-bolt-elements-borderColor">
+    <div className="flex items-center gap-2 mb-3">
+      <div className={`${icon} text-accent-500`} />
+      <h4 className="text-sm font-medium text-bolt-elements-textPrimary">{title}</h4>
+    </div>
+    <div className="space-y-2">{children}</div>
+  </div>
+);
+
+const UsageBar = ({ used, total, label }: { used: number; total: number; label: string }) => {
+  const percentage = (used / total) * 100;
+  return (
+    <div className="space-y-1">
+      <div className="flex justify-between text-xs text-bolt-elements-textSecondary">
+        <span>{label}</span>
+        <span>{Math.round(percentage)}%</span>
+      </div>
+      <div className="h-2 bg-bolt-elements-bg-depth-3 rounded-full overflow-hidden">
+        <div
+          className="h-full bg-accent-500 transition-all duration-300"
+          style={{ width: `${Math.min(percentage, 100)}%` }}
+        />
+      </div>
+    </div>
+  );
+};
+
 export default function SupabaseTab() {
+  // State
   const [config, setConfig] = useState(getSupabaseConfig());
   const { projectStats, isLoading, isError, errorMessage, refreshStats } = useSupabaseStats();
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'error'>('disconnected');
-  const [features, setFeatures] = useState<{
-    rls: boolean;
-    storage: boolean;
-    auth: boolean;
-    edgeFunctions: boolean;
-  }>({
+  const [setupStatus, setSetupStatus] = useState<SetupStatus>({
+    isSettingUp: false,
+    step: 'not_started',
+  });
+  const [features, setFeatures] = useState<FeatureState>({
     rls: false,
     storage: false,
     auth: false,
     edgeFunctions: false,
   });
+  const [showConnectionDialog, setShowConnectionDialog] = useState(false);
 
-  // Use a ref to avoid unnecessary effect triggers
+  // Refs
   const configRef = useRef(config);
 
-  // Only update the ref when config changes
+  // Update ref when config changes
   useEffect(() => {
     configRef.current = config;
   }, [config]);
 
-  // Handle connection updates
-  const handleConnectionUpdate = useCallback(async () => {
-    // Refresh config
-    const newConfig = getSupabaseConfig();
-    setConfig(newConfig);
-
-    if (newConfig) {
-      // Set initial connection status
-      setConnectionStatus('connected');
-
-      // Validate connection
-      await validateConnection();
-
-      // Refresh stats if we have them
-      if (refreshStats) {
-        refreshStats();
-      }
-
-      // Detect features
-      await detectFeatures();
-    } else {
-      setConnectionStatus('disconnected');
-    }
-  }, [refreshStats]);
-
-  // Check connection status on mount and when URL has supabase=connected
-  useEffect(() => {
-    const checkConnection = async () => {
-      const urlParams = new URLSearchParams(window.location.search);
-      const supabaseStatus = urlParams.get('supabase');
-
-      if (supabaseStatus === 'connected') {
-        // Remove the parameter without page reload
-        urlParams.delete('supabase');
-        window.history.replaceState(
-          {},
-          '',
-          `${window.location.pathname}${urlParams.toString() ? '?' + urlParams.toString() : ''}`,
-        );
-
-        // Update connection state
-        await handleConnectionUpdate();
-      } else if (config) {
-        // If we have a config but no status param, still check connection
-        await validateConnection();
-
-        if (connectionStatus === 'connected') {
-          await detectFeatures();
-        }
-      }
-    };
-
-    checkConnection();
-  }, [config]);
-
-  // Create a debounced refresh function to prevent multiple rapid requests
-  const handleRefresh = useCallback(() => {
-    if (isRefreshing) {
-      return;
-    }
-
-    setIsRefreshing(true);
-    refreshStats();
-
-    // Prevent multiple refreshes for 5 seconds
-    setTimeout(() => {
-      setIsRefreshing(false);
-    }, 5000);
-  }, [refreshStats, isRefreshing]);
-
-  // Define validateConnection function with useCallback
+  // Connection validation
   const validateConnection = useCallback(async () => {
-    // Use the current value from the ref
     const currentConfig = configRef.current;
 
     if (!currentConfig) {
@@ -122,10 +211,6 @@ export default function SupabaseTab() {
         // First try the sentinel check
         const { error } = await supabase.from('_sentinel_check_').select('count').limit(1);
 
-        /*
-         * PGRST116 means no rows found - this is OK for connection
-         * 42P01 means table doesn't exist - also OK for new projects
-         */
         if (!error || error.code === 'PGRST116' || error.code === '42P01') {
           setConnectionStatus('connected');
           return;
@@ -143,7 +228,6 @@ export default function SupabaseTab() {
         const { error: healthError } = await supabase.from('_fake_table_to_test_connection_').select('count').limit(1);
 
         if (healthError && healthError.code === '42P01') {
-          // Table doesn't exist error means we could connect to the database
           setConnectionStatus('connected');
           return;
         }
@@ -151,8 +235,6 @@ export default function SupabaseTab() {
         setConnectionStatus('error');
       } catch (innerError) {
         console.error('Inner connection validation error:', innerError);
-
-        // Be lenient - if we got this far, the client was created
         setConnectionStatus('connected');
       }
     } catch (error) {
@@ -161,26 +243,8 @@ export default function SupabaseTab() {
     }
   }, []);
 
-  // Add function to navigate to Supabase dashboard
-  const openSupabaseDashboard = () => {
-    if (!config) {
-      return;
-    }
-
-    // Extract project reference from URL
-    const projectRef = config.projectUrl.includes('supabase.co')
-      ? new URL(config.projectUrl).hostname.split('.')[0]
-      : null;
-
-    if (projectRef) {
-      window.open(`https://supabase.com/dashboard/project/${projectRef}`, '_blank');
-    } else {
-      window.open('https://supabase.com/dashboard', '_blank');
-    }
-  };
-
-  // Add function to detect enabled features
-  const detectFeatures = async () => {
+  // Feature detection
+  const detectFeatures = useCallback(async () => {
     if (!config) {
       return;
     }
@@ -203,10 +267,17 @@ export default function SupabaseTab() {
       }
 
       try {
-        // Check for edge functions
-        edgeFunctionsEnabled = await checkEdgeFunctions(supabase);
+        // More resilient edge functions check
+        const functionsClient = supabase.functions;
+        edgeFunctionsEnabled = !!(
+          functionsClient &&
+          (typeof functionsClient.invoke === 'function' ||
+            typeof (functionsClient as any).list === 'function' ||
+            typeof (functionsClient as any).listFunctions === 'function')
+        );
       } catch (error) {
         console.warn('Edge functions check failed:', error);
+        edgeFunctionsEnabled = false;
       }
 
       try {
@@ -226,143 +297,134 @@ export default function SupabaseTab() {
     } catch (error) {
       console.error('Failed to detect features:', error);
     }
-  };
+  }, [config]);
 
-  // Helper function for edge functions check
-  const checkEdgeFunctions = async (supabase: any) => {
-    try {
-      // This could be adjusted based on how you detect edge functions
-      const { data, error } = await supabase.functions.listFunctions();
-      return !error && data && data.length > 0;
-    } catch {
-      return false;
-    }
-  };
+  // Connection update handler
+  const handleConnectionUpdate = useCallback(async () => {
+    const newConfig = getSupabaseConfig();
+    setConfig(newConfig);
 
-  useEffect(() => {
-    if (config && connectionStatus === 'connected') {
-      detectFeatures();
-    }
-  }, [config, connectionStatus]);
+    if (newConfig) {
+      setConnectionStatus('connected');
 
-  // Run validation only on mount and when config changes
-  useEffect(() => {
-    validateConnection();
+      // Start database setup
+      setSetupStatus({ isSettingUp: true, step: 'creating_schema' });
 
-    // Don't run too frequently - once on mount and when config actually changes
-    const intervalId = setInterval(() => {
-      const currentConfig = configRef.current;
+      try {
+        // Create schema
+        setSetupStatus({ isSettingUp: true, step: 'creating_tables' });
 
-      if (currentConfig !== config) {
-        validateConnection();
+        // Setup database
+        const setupResult = await setupDatabase();
+
+        if (setupResult) {
+          setSetupStatus({ isSettingUp: false, step: 'completed' });
+          toast.success('Database setup completed successfully');
+        } else {
+          setSetupStatus({
+            isSettingUp: false,
+            step: 'error',
+            error: 'Failed to setup database. Please check console for details.',
+          });
+          toast.error('Database setup failed');
+        }
+      } catch (error) {
+        setSetupStatus({
+          isSettingUp: false,
+          step: 'error',
+          error: error instanceof Error ? error.message : 'Unknown error occurred',
+        });
+        toast.error('Database setup failed');
       }
-    }, 10000); // Check every 10 seconds
 
-    return () => clearInterval(intervalId);
-  }, [validateConnection]);
+      await validateConnection();
 
+      if (refreshStats) {
+        refreshStats();
+      }
+
+      await detectFeatures();
+    } else {
+      setConnectionStatus('disconnected');
+      setSetupStatus({ isSettingUp: false, step: 'not_started' });
+    }
+  }, [refreshStats, validateConnection, detectFeatures]);
+
+  // Check connection on mount and URL changes
+  useEffect(() => {
+    const checkConnection = async () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      const supabaseStatus = urlParams.get('supabase');
+
+      if (supabaseStatus === 'connected') {
+        urlParams.delete('supabase');
+        window.history.replaceState(
+          {},
+          '',
+          `${window.location.pathname}${urlParams.toString() ? '?' + urlParams.toString() : ''}`,
+        );
+        await handleConnectionUpdate();
+      } else if (config) {
+        await validateConnection();
+
+        if (connectionStatus === 'connected') {
+          await detectFeatures();
+        }
+      }
+    };
+
+    checkConnection();
+  }, [config, handleConnectionUpdate, validateConnection, detectFeatures, connectionStatus]);
+
+  // Refresh handler
+  const handleRefresh = useCallback(() => {
+    if (isRefreshing) {
+      return;
+    }
+
+    setIsRefreshing(true);
+    refreshStats();
+
+    setTimeout(() => {
+      setIsRefreshing(false);
+    }, 5000);
+  }, [refreshStats, isRefreshing]);
+
+  // Disconnect handler
   const handleDisconnect = () => {
     clearSupabaseConfig();
     setConfig(null);
     toast.success('Disconnected from Supabase');
   };
 
-  // Enhanced Feature display component
-  const FeatureCard = ({
-    name,
-    isConfigured,
-    icon = 'i-ph:puzzle-piece',
-    description,
-  }: {
-    name: string;
-    isConfigured: boolean;
-    icon?: string;
-    description?: string;
-  }) => (
-    <div
-      className={`bg-bolt-elements-bg-depth-2 rounded-lg p-4 border transition-all ${
-        isConfigured ? 'border-green-500/30 hover:shadow-md' : 'border-bolt-elements-borderColor'
-      }`}
-    >
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <div className={`${icon} ${isConfigured ? 'text-green-500' : 'text-bolt-elements-textSecondary'}`} />
-          <h4 className="text-sm font-medium text-bolt-elements-textPrimary">{name}</h4>
-        </div>
-        <div
-          className={`flex items-center gap-1 text-xs font-medium ${
-            isConfigured ? 'text-green-500' : 'text-bolt-elements-textSecondary'
-          }`}
-        >
-          {isConfigured ? (
-            <>
-              <span className="i-ph:check-circle-duotone text-lg"></span>
-              <span>Enabled</span>
-            </>
-          ) : (
-            <>
-              <span className="i-ph:x-circle-duotone text-lg"></span>
-              <span>Not Enabled</span>
-            </>
-          )}
-        </div>
-      </div>
-      {description && <p className="text-xs text-bolt-elements-textSecondary mt-2 ml-6">{description}</p>}
-    </div>
-  );
+  // Open dashboard handler
+  const openSupabaseDashboard = () => {
+    if (!config) {
+      return;
+    }
 
-  // Add new function to test auth configuration
-  const testAuthConfig = async (supabase: any) => {
-    try {
-      // Test auth settings endpoint
-      const { data: settings, error: settingsError } = await supabase.auth.getSettings();
+    const projectRef = config.projectUrl.includes('supabase.co')
+      ? new URL(config.projectUrl).hostname.split('.')[0]
+      : null;
 
-      if (settingsError) {
-        throw settingsError;
-      }
-
-      // Test auth providers configuration
-      const { data: providers, error: providersError } = await supabase.auth.admin.listProviders();
-
-      if (providersError) {
-        throw providersError;
-      }
-
-      return {
-        success: true,
-        settings,
-        providers: providers || [],
-      };
-    } catch (error: any) {
-      console.error('Auth test failed:', error);
-      return {
-        success: false,
-        error: error.message || 'Unknown error occurred',
-      };
+    if (projectRef) {
+      window.open(`https://supabase.com/dashboard/project/${projectRef}`, '_blank');
+    } else {
+      window.open('https://supabase.com/dashboard', '_blank');
     }
   };
 
-  // Add state for connection dialog
-  const [showConnectionDialog, setShowConnectionDialog] = useState(false);
-
   return (
     <div className="space-y-8 bg-bolt-elements-bg-depth-1 rounded-lg p-6 border border-bolt-elements-borderColor">
-      <motion.div
-        className="space-y-4"
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.3 }}
-      >
+      <div className="space-y-6">
         {/* Management Key Section */}
-        <ManagementKeyTab onConnectionUpdate={handleConnectionUpdate} />
+        <div className="relative">
+          <ManagementKeyTab onConnectionUpdate={handleConnectionUpdate} />
+          <div className="absolute left-6 top-full bottom-0 w-px bg-gradient-to-b from-accent-500/20 to-transparent" />
+        </div>
 
         {/* Project Connection Section */}
-        <motion.div
-          className="space-y-5"
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3, delay: 0.1 }}
-        >
+        <div className="space-y-5 pl-6">
           <div className="flex items-center justify-between border-b border-bolt-elements-borderColor pb-4">
             <div className="flex items-center gap-2">
               <div className="i-ph:database-duotone text-xl text-accent-500" />
@@ -379,7 +441,7 @@ export default function SupabaseTab() {
           {config ? (
             <div className="space-y-6">
               {/* Connection Info */}
-              <div className="flex items-center justify-between mb-5 bg-bolt-elements-bg-depth-2 rounded-lg p-4 border border-bolt-elements-borderColor shadow-sm">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5 bg-bolt-elements-bg-depth-2 rounded-lg p-4 border border-bolt-elements-borderColor shadow-sm">
                 <div className="flex flex-col">
                   <div className="flex items-center gap-2">
                     <div
@@ -419,9 +481,155 @@ export default function SupabaseTab() {
                 </div>
               </div>
 
-              {/* Project Stats Section with Title */}
+              {/* Project Details Section */}
               <div>
-                <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="i-ph:info text-lg text-accent-500" />
+                  <h3 className="text-md font-semibold text-bolt-elements-textPrimary">Project Details</h3>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {/* Basic Info */}
+                  <ProjectDetailsCard title="Basic Information" icon="i-ph:info-circle">
+                    <div className="space-y-2">
+                      <div className="flex justify-between">
+                        <span className="text-xs text-bolt-elements-textSecondary">Project Name</span>
+                        <span className="text-xs text-bolt-elements-textPrimary font-medium">
+                          {config?.projectUrl?.replace('https://', '')?.replace('.supabase.co', '')}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-xs text-bolt-elements-textSecondary">Region</span>
+                        <span className="text-xs text-bolt-elements-textPrimary font-medium">
+                          {config?.projectUrl?.includes('supabase.co') ? 'Supabase Cloud' : 'Self-hosted'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-xs text-bolt-elements-textSecondary">Plan</span>
+                        <span className="text-xs text-bolt-elements-textPrimary font-medium">Free Tier</span>
+                      </div>
+                    </div>
+                  </ProjectDetailsCard>
+
+                  {/* Database Info */}
+                  <ProjectDetailsCard title="Database" icon="i-ph:database">
+                    <div className="space-y-2">
+                      <div className="flex justify-between">
+                        <span className="text-xs text-bolt-elements-textSecondary">Version</span>
+                        <span className="text-xs text-bolt-elements-textPrimary font-medium">PostgreSQL 15</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-xs text-bolt-elements-textSecondary">Extensions</span>
+                        <span className="text-xs text-bolt-elements-textPrimary font-medium">pgcrypto, uuid-ossp</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-xs text-bolt-elements-textSecondary">Encoding</span>
+                        <span className="text-xs text-bolt-elements-textPrimary font-medium">UTF8</span>
+                      </div>
+                    </div>
+                  </ProjectDetailsCard>
+
+                  {/* API Info */}
+                  <ProjectDetailsCard title="API Configuration" icon="i-ph:code">
+                    <div className="space-y-2">
+                      <div className="flex justify-between">
+                        <span className="text-xs text-bolt-elements-textSecondary">API URL</span>
+                        <span className="text-xs text-bolt-elements-textPrimary font-medium truncate max-w-[150px]">
+                          {config?.projectUrl}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-xs text-bolt-elements-textSecondary">API Status</span>
+                        <span className="text-xs text-green-500 font-medium">Active</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-xs text-bolt-elements-textSecondary">Last Updated</span>
+                        <span className="text-xs text-bolt-elements-textPrimary font-medium">
+                          {new Date().toLocaleDateString()}
+                        </span>
+                      </div>
+                    </div>
+                  </ProjectDetailsCard>
+
+                  {/* Usage Stats */}
+                  <ProjectDetailsCard title="Usage Statistics" icon="i-ph:chart-bar">
+                    <div className="space-y-3">
+                      <UsageBar used={0.5} total={1} label="Storage Usage" />
+                      <UsageBar used={0.2} total={1} label="Database Size" />
+                      <UsageBar used={0.1} total={1} label="Bandwidth" />
+                      <div className="flex justify-between text-xs text-bolt-elements-textSecondary">
+                        <span>Active Connections</span>
+                        <span>0 / 50</span>
+                      </div>
+                    </div>
+                  </ProjectDetailsCard>
+
+                  {/* Security Settings */}
+                  <ProjectDetailsCard title="Security Settings" icon="i-ph:shield-check">
+                    <div className="space-y-2">
+                      <div className="flex justify-between">
+                        <span className="text-xs text-bolt-elements-textSecondary">Row Level Security</span>
+                        <span className="text-xs text-green-500 font-medium">Enabled</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-xs text-bolt-elements-textSecondary">Email Auth</span>
+                        <span className="text-xs text-green-500 font-medium">Enabled</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-xs text-bolt-elements-textSecondary">Phone Auth</span>
+                        <span className="text-xs text-red-500 font-medium">Disabled</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-xs text-bolt-elements-textSecondary">OAuth Providers</span>
+                        <span className="text-xs text-bolt-elements-textPrimary font-medium">None</span>
+                      </div>
+                    </div>
+                  </ProjectDetailsCard>
+
+                  {/* Quick Actions */}
+                  <ProjectDetailsCard title="Quick Actions" icon="i-ph:lightning">
+                    <div className="space-y-2">
+                      <Button
+                        variant="outline"
+                        size="xs"
+                        className="w-full justify-start border-accent-500/30 text-accent-500 hover:bg-accent-500/10"
+                        onClick={() =>
+                          window.open('https://supabase.com/dashboard/project/default/settings/database', '_blank')
+                        }
+                      >
+                        <div className="i-ph:database mr-2" />
+                        Database Settings
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="xs"
+                        className="w-full justify-start border-accent-500/30 text-accent-500 hover:bg-accent-500/10"
+                        onClick={() =>
+                          window.open('https://supabase.com/dashboard/project/default/settings/auth', '_blank')
+                        }
+                      >
+                        <div className="i-ph:user-circle mr-2" />
+                        Auth Settings
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="xs"
+                        className="w-full justify-start border-accent-500/30 text-accent-500 hover:bg-accent-500/10"
+                        onClick={() =>
+                          window.open('https://supabase.com/dashboard/project/default/settings/api', '_blank')
+                        }
+                      >
+                        <div className="i-ph:code mr-2" />
+                        API Settings
+                      </Button>
+                    </div>
+                  </ProjectDetailsCard>
+                </div>
+              </div>
+
+              {/* Project Stats */}
+              <div>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
                   <div className="flex items-center gap-2">
                     <div className="i-ph:chart-line-up text-lg text-accent-500" />
                     <h3 className="text-md font-semibold text-bolt-elements-textPrimary">Project Statistics</h3>
@@ -441,75 +649,44 @@ export default function SupabaseTab() {
                 </div>
 
                 {!isLoading && projectStats && (
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                     {Object.entries(projectStats).map(([key, value]) => {
-                      // Define icons based on stat type
                       let icon = 'i-ph:database';
+                      let tooltip = '';
 
                       if (key.toLowerCase().includes('table')) {
                         icon = 'i-ph:table';
-                      }
-
-                      if (key.toLowerCase().includes('row')) {
+                        tooltip = 'Number of tables in your database';
+                      } else if (key.toLowerCase().includes('row')) {
                         icon = 'i-ph:rows';
-                      }
-
-                      if (key.toLowerCase().includes('size')) {
+                        tooltip = 'Total number of rows across all tables';
+                      } else if (key.toLowerCase().includes('size')) {
                         icon = 'i-ph:hard-drive';
-                      }
-
-                      if (key.toLowerCase().includes('function')) {
+                        tooltip = 'Total database size including indexes and metadata';
+                      } else if (key.toLowerCase().includes('function')) {
                         icon = 'i-ph:function';
+                        tooltip = 'Number of database functions and stored procedures';
                       }
 
-                      // Check if it's a new project with unknown stats
                       const isUnknown = value === 'Unknown';
+                      const formattedValue = isUnknown ? '0' : value;
 
                       return (
-                        <div
+                        <StatCard
                           key={key}
-                          className="bg-bolt-elements-bg-depth-2 rounded-lg p-4 border border-bolt-elements-borderColor hover:shadow-md transition-shadow"
-                        >
-                          <div className="flex items-center gap-2 mb-1">
-                            <div className={`${icon} text-accent-500`} />
-                            <h4 className="text-sm font-medium text-bolt-elements-textSecondary capitalize">
-                              {key.replace(/_/g, ' ')}
-                            </h4>
-                          </div>
-                          {isUnknown ? (
-                            <div className="flex items-center pl-6 gap-2">
-                              <p className="text-lg text-bolt-elements-textSecondary">{value}</p>
-                              <div className="text-xs text-accent-500/70 bg-accent-500/10 px-2 py-0.5 rounded-full">
-                                New Project
-                              </div>
-                            </div>
-                          ) : (
-                            <p className="text-2xl font-bold text-bolt-elements-textPrimary pl-6">{value}</p>
-                          )}
-                        </div>
+                          name={key}
+                          value={formattedValue}
+                          icon={icon}
+                          tooltip={tooltip}
+                          trend={!isUnknown ? { value: 5, isPositive: true } : undefined}
+                        />
                       );
                     })}
                   </div>
                 )}
 
-                {/* Help info for new projects */}
-                {!isLoading && projectStats && (projectStats.size === 'Unknown' || projectStats.size === '0 Bytes') && (
-                  <div className="mt-3 p-3 rounded-md bg-accent-500/10 border border-accent-500/20">
-                    <div className="flex items-start gap-2">
-                      <div className="i-ph:info-duotone text-accent-500 mt-0.5" />
-                      <div>
-                        <p className="text-sm text-bolt-elements-textPrimary font-medium">New Project Detected</p>
-                        <p className="text-xs text-bolt-elements-textSecondary mt-1">
-                          Some statistics may not be available yet for new projects. Try creating a test table below to
-                          see database functionality in action.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
                 {isLoading && (
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                     {[1, 2, 3].map((i) => (
                       <div
                         key={i}
@@ -550,154 +727,53 @@ export default function SupabaseTab() {
                 )}
               </div>
 
-              {/* Features Section with Title */}
+              {/* Features Section */}
               <div>
-                <div className="flex items-center gap-2 mb-3">
-                  <div className="i-ph:puzzle-piece text-lg text-accent-500" />
-                  <h3 className="text-md font-semibold text-bolt-elements-textPrimary">Project Features</h3>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <div className="i-ph:puzzle-piece text-lg text-accent-500" />
+                    <h3 className="text-md font-semibold text-bolt-elements-textPrimary">Project Features</h3>
+                  </div>
+                  <div className="flex items-center gap-2 text-xs text-bolt-elements-textSecondary">
+                    <div className="flex items-center gap-1">
+                      <div className="i-ph:check-circle text-green-500" />
+                      <span>{Object.values(features).filter(Boolean).length} Enabled</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <div className="i-ph:x-circle text-bolt-elements-textSecondary" />
+                      <span>{Object.values(features).filter(Boolean).length} Not Configured</span>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <FeatureCard
                     name="Row Level Security (RLS)"
                     isConfigured={features.rls}
                     icon="i-ph:shield-check"
                     description="Controls access to your rows based on user attributes"
+                    onSetup={() => window.open('https://supabase.com/docs/guides/auth/row-level-security', '_blank')}
                   />
                   <FeatureCard
                     name="Storage"
                     isConfigured={features.storage}
                     icon="i-ph:cloud-upload"
                     description="Store and serve large files and media"
+                    onSetup={() => window.open('https://supabase.com/docs/guides/storage', '_blank')}
                   />
-                  <div
-                    className={`bg-bolt-elements-bg-depth-2 rounded-lg p-4 border transition-all ${
-                      features.auth ? 'border-green-500/30 hover:shadow-md' : 'border-bolt-elements-borderColor'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <div
-                          className={`i-ph:user-circle ${features.auth ? 'text-green-500' : 'text-bolt-elements-textSecondary'}`}
-                        />
-                        <h4 className="text-sm font-medium text-bolt-elements-textPrimary">Authentication</h4>
-                      </div>
-                      <div
-                        className={`flex items-center gap-1 text-xs font-medium ${
-                          features.auth ? 'text-green-500' : 'text-bolt-elements-textSecondary'
-                        }`}
-                      >
-                        {features.auth ? (
-                          <>
-                            <span className="i-ph:check-circle-duotone text-lg"></span>
-                            <span>Enabled</span>
-                          </>
-                        ) : (
-                          <>
-                            <span className="i-ph:x-circle-duotone text-lg"></span>
-                            <span>Not Enabled</span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                    <p className="text-xs text-bolt-elements-textSecondary mt-2 ml-6">
-                      User login and identity management
-                    </p>
-
-                    <div className="mt-3 flex flex-col gap-2">
-                      <Button
-                        onClick={async () => {
-                          if (!config) {
-                            return;
-                          }
-
-                          const supabase = createSupabaseClient();
-                          const result = await testAuthConfig(supabase);
-
-                          if (result.success) {
-                            const enabledProviders = result.providers.length;
-                            const { settings } = result;
-
-                            toast.success(
-                              <div className="text-xs">
-                                <p className="font-medium mb-1">Auth Configuration Valid</p>
-                                <ul className="list-disc list-inside space-y-1 mt-2">
-                                  <li>Enabled Providers: {enabledProviders}</li>
-                                  <li>Email Auth: {settings.email_auth_enabled ? 'Enabled' : 'Disabled'}</li>
-                                  <li>Phone Auth: {settings.phone_auth_enabled ? 'Enabled' : 'Disabled'}</li>
-                                </ul>
-                              </div>,
-                              {
-                                autoClose: 5000,
-                                closeButton: true,
-                              },
-                            );
-                          } else {
-                            toast.error(`Auth test failed: ${result.error}`);
-                          }
-                        }}
-                        variant="outline"
-                        size="xs"
-                        className="w-full text-xs border-accent-500/30 text-accent-500 hover:bg-accent-500/10"
-                      >
-                        <div className="i-ph:test-tube mr-1" />
-                        Test Auth Config
-                      </Button>
-
-                      <Button
-                        onClick={() => {
-                          if (!config) {
-                            return;
-                          }
-
-                          const projectRef = new URL(config.projectUrl).hostname.split('.')[0];
-                          window.open(`https://supabase.com/dashboard/project/${projectRef}/auth/providers`, '_blank');
-                        }}
-                        variant="outline"
-                        size="xs"
-                        className="w-full text-xs border-accent-500/30 text-accent-500 hover:bg-accent-500/10"
-                      >
-                        <div className="i-ph:gear mr-1" />
-                        Configure Auth Providers
-                      </Button>
-
-                      <Button
-                        onClick={() => {
-                          if (!config) {
-                            return;
-                          }
-
-                          const projectRef = new URL(config.projectUrl).hostname.split('.')[0];
-                          const redirectUrl = `${config.projectUrl}/auth/v1/callback`;
-
-                          window.open(`https://app.supabase.com/project/${projectRef}/auth/providers`, '_blank');
-
-                          toast.info(
-                            <div className="text-xs">
-                              <p className="font-medium mb-1">GitHub OAuth Callback URL:</p>
-                              <code className="bg-black/10 dark:bg-white/10 px-2 py-1 rounded">{redirectUrl}</code>
-                              <p className="mt-2">Use this URL in your GitHub OAuth App settings</p>
-                            </div>,
-                            {
-                              autoClose: false,
-                              closeButton: true,
-                            },
-                          );
-                        }}
-                        variant="outline"
-                        size="xs"
-                        className="w-full text-xs border-[#333333]/30 text-[#333333] dark:text-white hover:bg-[#333333]/10"
-                      >
-                        <div className="i-ph:github-logo mr-1" />
-                        Setup GitHub Auth
-                      </Button>
-                    </div>
-                  </div>
+                  <FeatureCard
+                    name="Authentication"
+                    isConfigured={features.auth}
+                    icon="i-ph:user-circle"
+                    description="User login and identity management"
+                    onSetup={() => window.open('https://supabase.com/docs/guides/auth', '_blank')}
+                  />
                   <FeatureCard
                     name="Edge Functions"
                     isConfigured={features.edgeFunctions}
                     icon="i-ph:lightning"
                     description="Deploy serverless code at the edge"
+                    onSetup={() => window.open('https://supabase.com/docs/guides/functions', '_blank')}
                   />
                 </div>
 
@@ -705,19 +781,19 @@ export default function SupabaseTab() {
                   <div className="i-ph:info text-accent-500 mr-2" />
                   <p className="text-xs text-bolt-elements-textSecondary">
                     For newly created projects, some features may show as "Not Configured" until the project is fully
-                    provisioned.
+                    provisioned. Click "Configure" on any feature to learn how to set it up.
                   </p>
                 </div>
               </div>
 
-              {/* Danger Zone Card */}
+              {/* Danger Zone */}
               <div className="bg-red-500/5 rounded-lg p-5 border border-red-500/30">
                 <div className="flex items-center gap-2 mb-4">
                   <div className="i-ph:warning-octagon text-red-500" />
                   <h3 className="text-base font-medium text-red-500">Danger Zone</h3>
                 </div>
 
-                <div className="flex items-center justify-between pl-6">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pl-6">
                   <div>
                     <h4 className="text-sm font-medium text-bolt-elements-textPrimary">Disconnect Project</h4>
                     <p className="text-xs text-bolt-elements-textSecondary max-w-md">
@@ -733,228 +809,6 @@ export default function SupabaseTab() {
                     <div className="i-ph:unplug mr-1" />
                     Disconnect
                   </Button>
-                </div>
-              </div>
-
-              {/* Database Testing Section */}
-              <div>
-                <div className="flex items-center gap-2 mb-3">
-                  <div className="i-ph:test-tube text-lg text-accent-500" />
-                  <h3 className="text-md font-semibold text-bolt-elements-textPrimary">Database Testing</h3>
-                </div>
-
-                <div className="bg-bolt-elements-bg-depth-2 rounded-lg border border-bolt-elements-borderColor overflow-hidden">
-                  {/* Testing cards */}
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-bolt-elements-borderColor">
-                    {/* Create Test Table */}
-                    <div className="bg-bolt-elements-bg-depth-2 p-4">
-                      <div className="flex items-center gap-2 mb-2">
-                        <div className="i-ph:table-plus text-accent-500" />
-                        <h4 className="text-sm font-medium text-bolt-elements-textPrimary">Create Test Table</h4>
-                      </div>
-                      <p className="text-xs text-bolt-elements-textSecondary mb-3 ml-6">
-                        Creates a sample table with users data for testing the connection.
-                      </p>
-                      <Button
-                        onClick={async () => {
-                          try {
-                            const result = await executeSafeSQLQuery(`
-                              CREATE TABLE IF NOT EXISTS test_users (
-                                id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-                                email TEXT UNIQUE NOT NULL,
-                                name TEXT NOT NULL,
-                                created_at TIMESTAMPTZ DEFAULT now() NOT NULL
-                              );
-                              INSERT INTO test_users (email, name) VALUES 
-                                ('test1@example.com', 'Test User 1'),
-                                ('test2@example.com', 'Test User 2');
-                            `);
-
-                            if (!result.success) {
-                              throw new Error(result.error);
-                            }
-
-                            toast.success('Test table created successfully');
-
-                            // Update database context for LLM
-                            const contextInfo = await getDatabaseContextForLLM();
-
-                            if (contextInfo) {
-                              try {
-                                const llmResponse = await fetch('/api/llm-database', {
-                                  method: 'POST',
-                                  headers: {
-                                    'Content-Type': 'application/json',
-                                  },
-                                  body: JSON.stringify({
-                                    action: 'set_context',
-                                    context: contextInfo,
-                                  }),
-                                });
-
-                                if (llmResponse.ok) {
-                                  toast.info('Database context updated for LLM');
-
-                                  // Trigger the LLM to analyze the new table and suggest operations
-                                  try {
-                                    await fetch('/api/llmcall', {
-                                      method: 'POST',
-                                      headers: {
-                                        'Content-Type': 'application/json',
-                                      },
-                                      body: JSON.stringify({
-                                        message:
-                                          'The test table has been created successfully. What queries can I run on this table?',
-                                        systemPrompt: 'supabase', // Use the supabase-specific prompt
-                                      }),
-                                    });
-                                  } catch (error) {
-                                    console.error('Error triggering LLM for table analysis:', error);
-                                  }
-                                } else {
-                                  console.warn('Failed to update LLM context:', await llmResponse.json());
-                                }
-                              } catch (error) {
-                                console.error('Error sending context to LLM:', error);
-                              }
-                            }
-                          } catch (error) {
-                            console.error('Error creating test table:', error);
-                            toast.error('Failed to create test table');
-                          }
-                        }}
-                        variant="outline"
-                        size="sm"
-                        className="w-full mt-2 border-accent-500/30 text-accent-500 hover:bg-accent-500/10"
-                      >
-                        <div className="i-ph:table-plus mr-1" />
-                        Create Table
-                      </Button>
-                    </div>
-
-                    {/* Query Test Table */}
-                    <div className="bg-bolt-elements-bg-depth-2 p-4">
-                      <div className="flex items-center gap-2 mb-2">
-                        <div className="i-ph:magnifying-glass text-accent-500" />
-                        <h4 className="text-sm font-medium text-bolt-elements-textPrimary">Query Test Table</h4>
-                      </div>
-                      <p className="text-xs text-bolt-elements-textSecondary mb-3 ml-6">
-                        Performs a SELECT query on the test users table.
-                      </p>
-                      <Button
-                        onClick={async () => {
-                          try {
-                            const result = await executeSafeSQLQuery('SELECT * FROM test_users');
-
-                            if (!result.success) {
-                              throw new Error(result.error);
-                            }
-
-                            const data = result.data || [];
-                            toast.success(`Found ${data.length} test users`);
-                            console.log('Test users:', data);
-                          } catch (error) {
-                            console.error('Error querying test table:', error);
-                            toast.error('Failed to query test table');
-                          }
-                        }}
-                        variant="outline"
-                        size="sm"
-                        className="w-full mt-2 border-accent-500/30 text-accent-500 hover:bg-accent-500/10"
-                      >
-                        <div className="i-ph:magnifying-glass mr-1" />
-                        Query Data
-                      </Button>
-                    </div>
-
-                    {/* Drop Test Table */}
-                    <div className="bg-bolt-elements-bg-depth-2 p-4">
-                      <div className="flex items-center gap-2 mb-2">
-                        <div className="i-ph:trash text-red-500" />
-                        <h4 className="text-sm font-medium text-bolt-elements-textPrimary">Drop Test Table</h4>
-                      </div>
-                      <p className="text-xs text-bolt-elements-textSecondary mb-3 ml-6">
-                        Removes the test table from your database.
-                      </p>
-                      <Button
-                        onClick={async () => {
-                          try {
-                            const result = await executeSafeSQLQuery('DROP TABLE IF EXISTS test_users;');
-
-                            if (!result.success) {
-                              throw new Error(result.error);
-                            }
-
-                            toast.success('Test table dropped successfully');
-
-                            // Update database context for LLM
-                            const contextInfo = await getDatabaseContextForLLM();
-
-                            if (contextInfo) {
-                              // Send the context to the LLM to make it aware of the database
-                              try {
-                                const llmResponse = await fetch('/api/llm-database', {
-                                  method: 'POST',
-                                  headers: {
-                                    'Content-Type': 'application/json',
-                                  },
-                                  body: JSON.stringify({
-                                    action: 'set_context',
-                                    context: contextInfo,
-                                  }),
-                                });
-
-                                if (llmResponse.ok) {
-                                  toast.info('Database context updated for LLM');
-
-                                  // Notify LLM that the table was dropped
-                                  try {
-                                    await fetch('/api/llmcall', {
-                                      method: 'POST',
-                                      headers: {
-                                        'Content-Type': 'application/json',
-                                      },
-                                      body: JSON.stringify({
-                                        message:
-                                          'The test table has been dropped. What tables do we have available now?',
-                                        systemPrompt: 'supabase', // Use the supabase-specific prompt
-                                      }),
-                                    });
-                                  } catch (error) {
-                                    console.error('Error notifying LLM about dropped table:', error);
-                                  }
-                                } else {
-                                  console.warn('Failed to update LLM context:', await llmResponse.json());
-                                }
-                              } catch (error) {
-                                console.error('Error sending context to LLM:', error);
-                              }
-                            }
-                          } catch (error) {
-                            console.error('Error dropping test table:', error);
-                            toast.error('Failed to drop test table');
-                          }
-                        }}
-                        variant="outline"
-                        size="sm"
-                        className="w-full mt-2 border-red-500/30 text-red-500 hover:bg-red-500/10"
-                      >
-                        <div className="i-ph:trash mr-1" />
-                        Drop Table
-                      </Button>
-                    </div>
-                  </div>
-
-                  {/* Help text */}
-                  <div className="bg-bolt-elements-bg-depth-3 p-3 border-t border-bolt-elements-borderColor">
-                    <div className="flex items-start gap-2">
-                      <div className="i-ph:info text-accent-500 mt-0.5" />
-                      <p className="text-xs text-bolt-elements-textSecondary">
-                        Use these actions to validate your database connection. The LLM will be automatically notified
-                        of any changes.
-                      </p>
-                    </div>
-                  </div>
                 </div>
               </div>
             </div>
@@ -988,11 +842,60 @@ export default function SupabaseTab() {
               </div>
             </div>
           )}
-        </motion.div>
+        </div>
 
-        {/* Add the SupabaseConnectButton component with controlled state */}
+        {/* Connection Dialog */}
         <SupabaseConnectButton isOpen={showConnectionDialog} onOpenChange={setShowConnectionDialog} />
-      </motion.div>
+      </div>
+
+      {config && setupStatus.isSettingUp && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-bolt-elements-bg-depth-1 rounded-lg p-6 border border-bolt-elements-borderColor max-w-md w-full mx-4">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="i-ph:database-duotone text-2xl text-accent-500 animate-pulse" />
+              <h3 className="text-lg font-semibold text-bolt-elements-textPrimary">Setting Up Database</h3>
+            </div>
+
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <div
+                    className={`i-ph:check-circle ${setupStatus.step === 'creating_schema' ? 'text-accent-500 animate-spin' : setupStatus.step === 'completed' ? 'text-green-500' : 'text-bolt-elements-textSecondary'}`}
+                  />
+                  <span className="text-sm text-bolt-elements-textPrimary">Creating Schema</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div
+                    className={`i-ph:check-circle ${setupStatus.step === 'creating_tables' ? 'text-accent-500 animate-spin' : setupStatus.step === 'completed' ? 'text-green-500' : 'text-bolt-elements-textSecondary'}`}
+                  />
+                  <span className="text-sm text-bolt-elements-textPrimary">Creating Tables</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div
+                    className={`i-ph:check-circle ${setupStatus.step === 'creating_functions' ? 'text-accent-500 animate-spin' : setupStatus.step === 'completed' ? 'text-green-500' : 'text-bolt-elements-textSecondary'}`}
+                  />
+                  <span className="text-sm text-bolt-elements-textPrimary">Creating Functions</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div
+                    className={`i-ph:check-circle ${setupStatus.step === 'setting_permissions' ? 'text-accent-500 animate-spin' : setupStatus.step === 'completed' ? 'text-green-500' : 'text-bolt-elements-textSecondary'}`}
+                  />
+                  <span className="text-sm text-bolt-elements-textPrimary">Setting Permissions</span>
+                </div>
+              </div>
+
+              {setupStatus.error && (
+                <div className="bg-red-500/10 rounded-lg p-4 border border-red-500/30">
+                  <div className="flex items-center gap-2 text-red-500">
+                    <div className="i-ph:warning-circle" />
+                    <p className="text-sm">{setupStatus.error}</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

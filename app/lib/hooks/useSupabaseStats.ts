@@ -14,12 +14,11 @@ interface ProjectStats {
   rows: number;
 }
 
-export function useSupabaseStats() {
-  const config = getSupabaseConfig();
+export const useSupabaseStats = () => {
   const [projectStats, setProjectStats] = useState<ProjectStats | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [isError, setIsError] = useState(false);
-  const [errorMessage, setErrorMessage] = useState('');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const formatBytes = (bytes: number) => {
     if (bytes === 0) {
@@ -34,207 +33,109 @@ export function useSupabaseStats() {
   };
 
   // Use a ref to prevent unnecessary re-renders
-  const configRef = useRef(config);
+  const configRef = useRef(getSupabaseConfig());
 
   // Update the ref when config changes
   useEffect(() => {
-    configRef.current = config;
-  }, [config]);
+    configRef.current = getSupabaseConfig();
+  }, []);
 
-  const loadProjectStats = useCallback(async () => {
-    // Use the ref value instead of the dependency
-    const currentConfig = configRef.current;
-
-    if (!currentConfig) {
-      setIsLoading(false);
-      return;
-    }
-
-    setIsLoading(true);
-    setIsError(false);
-
+  const fetchStats = useCallback(async () => {
     try {
+      setIsLoading(true);
+      setIsError(false);
+      setErrorMessage(null);
+
       const supabase = createSupabaseClient();
 
-      /*
-       * First check if we can get a list of tables from information_schema
-       * This is the safest approach that should work on any Supabase project
-       */
+      // Try to get stats from the stats endpoint first
       try {
-        /*
-         * Check if this is a new project by checking for tables in pg_catalog
-         * This prevents unnecessary 404 requests to non-existent tables
-         */
-        const { data: tableExists, error: tableCheckError } = await supabase
-          .from('pg_catalog.pg_tables')
-          .select('schemaname, tablename')
-          .eq('schemaname', 'public')
-          .limit(1);
-
-        // If we can't access pg_catalog or there are no public tables, it's likely a new project
-        if (tableCheckError || !tableExists || tableExists.length === 0) {
-          console.log('New project detected, stats will be available later');
-          setProjectStats({
-            tables: 0,
-            size: '0 Bytes',
-            rows: 0,
-          });
-          setIsLoading(false);
-
+        const { data: stats, error } = await supabase.rpc('get_project_stats');
+        if (!error && stats) {
+          setProjectStats(stats);
           return;
         }
+      } catch (error) {
+        console.warn('Failed to fetch stats from RPC:', error);
+      }
 
-        // Only try to access information_schema if we didn't get a table not found error
-        const { data: basicTables, error: basicError } = await supabase
+      // Fallback to direct table queries
+      const stats: ProjectStats = {
+        total_tables: 0,
+        total_rows: 0,
+        total_size: '0 MB',
+        total_functions: 0,
+      };
+
+      try {
+        // Get table count
+        const { data: tables, error: tablesError } = await supabase
           .from('information_schema.tables')
-          .select('table_name')
-          .eq('table_schema', 'public')
-          .eq('table_type', 'BASE TABLE');
+          .select('count')
+          .eq('table_schema', 'public');
 
-        if (!basicError && basicTables) {
-          // We have basic table information, but still try to get detailed stats
-          const basicTableCount = basicTables.length;
-
-          try {
-            /*
-             * Check if the function exists first to avoid 404 errors
-             * Try a safer approach first
-             */
-            try {
-              // Check if the function exists by querying the information schema
-              const { data: functionExists, error: functionCheckError } = await supabase
-                .from('information_schema.routines')
-                .select('routine_name')
-                .eq('routine_name', 'get_table_info')
-                .eq('routine_schema', 'public')
-                .limit(1);
-
-              // If we can't check or the function doesn't exist, skip this step
-              if (functionCheckError || !functionExists || functionExists.length === 0) {
-                console.log('get_table_info function not found, using basic table information');
-                setProjectStats({
-                  tables: basicTableCount,
-                  size: 'Unknown',
-                  rows: 0,
-                });
-                setIsLoading(false);
-
-                return;
-              }
-            } catch {
-              // If we can't even check for the function, just use basic info
-              console.log('Unable to check for get_table_info function, using basic table information');
-              setProjectStats({
-                tables: basicTableCount,
-                size: 'Unknown',
-                rows: 0,
-              });
-              setIsLoading(false);
-
-              return;
-            }
-
-            // Only call the function if we confirmed it exists
-            const { data: tables, error } = await supabase.rpc('get_table_info');
-
-            if (error) {
-              // For new projects, the function might not exist yet, but we have basic info
-              if (error.code === 'PGRST202') {
-                // Show basic stats with placeholders
-                console.log('New project detected, using basic table information');
-                setProjectStats({
-                  tables: basicTableCount,
-                  size: 'Unknown',
-                  rows: 0,
-                });
-                setIsLoading(false);
-
-                return;
-              }
-
-              // If any other error, we still have basic table count
-              setProjectStats({
-                tables: basicTableCount,
-                size: 'Unknown',
-                rows: 0,
-              });
-              console.warn('Using basic stats due to error:', error);
-              setIsLoading(false);
-
-              return;
-            }
-
-            // We have detailed stats!
-            if (tables) {
-              setProjectStats({
-                tables: tables.length,
-                size: formatBytes(tables.reduce((acc: number, table: TableInfo) => acc + table.size, 0)),
-                rows: tables.reduce((acc: number, table: TableInfo) => acc + table.row_count, 0),
-              });
-            }
-          } catch (detailedError) {
-            // Just use basic info
-            console.warn('Failed to get detailed stats, using basic table count:', detailedError);
-            setProjectStats({
-              tables: basicTableCount,
-              size: 'Unknown',
-              rows: 0,
-            });
-          }
-        } else {
-          /*
-           * If we can't even get basic table info, we should be very cautious
-           * For new projects, it's better to just show empty stats than to make requests that will 404
-           */
-          console.log('Basic table info not available, likely a new project');
-          setProjectStats({
-            tables: 0,
-            size: '0 Bytes',
-            rows: 0,
-          });
-          setIsLoading(false);
-
-          return;
+        if (!tablesError && tables) {
+          stats.total_tables = parseInt(tables[0].count);
         }
-      } catch (statsError) {
-        console.warn('Failed to get any table stats, using fallback:', statsError);
-
-        // Complete fallback for new projects
-        setProjectStats({
-          tables: 0,
-          size: '0 Bytes',
-          rows: 0,
-        });
+      } catch (error) {
+        console.warn('Failed to get table count:', error);
       }
+
+      try {
+        // Get row count
+        const { data: rows, error: rowsError } = await supabase.rpc('get_total_rows');
+
+        if (!rowsError && rows) {
+          stats.total_rows = parseInt(rows);
+        }
+      } catch (error) {
+        console.warn('Failed to get row count:', error);
+      }
+
+      try {
+        // Get database size
+        const { data: size, error: sizeError } = await supabase.rpc('get_database_size');
+
+        if (!sizeError && size) {
+          stats.total_size = size;
+        }
+      } catch (error) {
+        console.warn('Failed to get database size:', error);
+      }
+
+      try {
+        // Get function count
+        const { data: functions, error: functionsError } = await supabase
+          .from('information_schema.routines')
+          .select('count')
+          .eq('routine_schema', 'public');
+
+        if (!functionsError && functions) {
+          stats.total_functions = parseInt(functions[0].count);
+        }
+      } catch (error) {
+        console.warn('Failed to get function count:', error);
+      }
+
+      setProjectStats(stats);
     } catch (error) {
-      console.error('Failed to load project stats:', error);
+      console.error('Failed to fetch project stats:', error);
       setIsError(true);
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to load project statistics');
-
-      // Don't show error toast for new projects
-      if (error instanceof Error && error.message.includes('PGRST202')) {
-        console.log('New project detected, stats will be available later');
-      } else {
-        toast.error('Failed to load project statistics');
-      }
+      setErrorMessage('Failed to load project statistics. Please try again later.');
     } finally {
       setIsLoading(false);
     }
-
-    // Remove config from dependencies since we use the ref
   }, []);
 
   useEffect(() => {
-    if (config) {
-      loadProjectStats();
-    }
-  }, [config, loadProjectStats]);
+    fetchStats();
+  }, [fetchStats]);
 
   return {
     projectStats,
     isLoading,
     isError,
     errorMessage,
-    refreshStats: loadProjectStats,
+    refreshStats: fetchStats,
   };
-}
+};

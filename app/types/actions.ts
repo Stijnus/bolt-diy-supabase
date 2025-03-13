@@ -1,3 +1,5 @@
+import type { DatabaseActionData } from '~/lib/actions/database-actions';
+
 export type ActionType = 'file' | 'shell';
 
 export interface BaseAction {
@@ -17,7 +19,7 @@ export interface StartAction extends BaseAction {
   type: 'start';
 }
 
-export type BoltAction = FileAction | ShellAction | StartAction;
+export type BoltAction = FileAction | ShellAction | StartAction | DatabaseActionData;
 
 export type BoltActionData = BoltAction | BaseAction;
 

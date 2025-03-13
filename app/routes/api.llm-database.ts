@@ -5,6 +5,8 @@ import {
   getDatabaseSchema,
   executeSafeSQLQuery,
   initializeLogging,
+  setDatabaseContext,
+  getStoredDatabaseContext,
 } from '~/lib/database/llm-supabase';
 import { executeDatabaseOperation, getDatabaseCapabilities } from '~/lib/database/llm-integration';
 
@@ -25,6 +27,17 @@ interface RequestData {
   context?: any; // For set_context action
 }
 
+interface DatabaseValidationResponse {
+  connected: boolean;
+  projectUrl: string;
+  features?: {
+    canQuery: boolean;
+    canModify: boolean;
+    hasSchema: boolean;
+  };
+  error?: string;
+}
+
 export async function action({ request }: ActionFunctionArgs) {
   try {
     if (request.method !== 'POST') {
@@ -34,9 +47,6 @@ export async function action({ request }: ActionFunctionArgs) {
     const requestData = (await request.json()) as RequestData;
     const { action, operation, context: providedContext } = requestData;
 
-    // First check database context
-    const context = await getDatabaseContext();
-
     // For get_capabilities and set_context, we'll allow these even without a connection
     if (action === 'get_capabilities') {
       const capabilities = await getDatabaseCapabilities();
@@ -45,18 +55,43 @@ export async function action({ request }: ActionFunctionArgs) {
 
     // Handle set_context action to update LLM's awareness of database
     if (action === 'set_context' && providedContext) {
-      console.log('LLM context updated with database information');
+      try {
+        // This will now validate the connection
+        await setDatabaseContext(providedContext);
 
-      /*
-       * In a real implementation, this would set the context in a session
-       * or pass it to the LLM system prompt generator
-       */
-      return json({
-        success: true,
-        message: 'Database context updated for LLM',
-        contextReceived: true,
-      });
+        // Get the validated context to return to the client
+        const validatedContext = await getStoredDatabaseContext(true);
+
+        const response: DatabaseValidationResponse = {
+          connected: validatedContext?.isAccessible ?? false,
+          projectUrl: validatedContext?.projectUrl ?? '',
+          features: validatedContext?.features,
+        };
+
+        if (!validatedContext?.isAccessible) {
+          response.error = 'Database connection validated but not fully accessible';
+        }
+
+        return json({
+          success: true,
+          message: 'Database context updated and validated for LLM',
+          validation: response,
+        });
+      } catch (error) {
+        return json({
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to validate database connection',
+          validation: {
+            connected: false,
+            projectUrl: providedContext.projectUrl,
+            error: 'Validation failed',
+          },
+        });
+      }
     }
+
+    // First check database context with validation
+    const context = await getDatabaseContext();
 
     if (!context.connected) {
       return json(
